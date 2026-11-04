@@ -1,0 +1,2 @@
+cryptography>=42
+h11>=0.14

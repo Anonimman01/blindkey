@@ -1,0 +1,26 @@
+# /etc/gatekeeper/config.toml: все ключи необязательны, ниже значения по умолчанию.
+# Неизвестный ключ = ошибка запуска (чтобы опечатки не проходили молча).
+
+[server]
+listen_host = "127.0.0.1"   # на VPS: "0.0.0.0" или адрес интерфейса
+listen_port = 8443
+
+[provider]
+name = "telegram"
+# Токен бота берётся из переменной окружения, а если её нет, из файла (права 0400).
+# В самом config.toml токена быть не должно.
+secret_env = "GATEKEEPER_UPSTREAM_TOKEN"
+# secret_file = "/etc/gatekeeper/upstream.token"
+# Только для тестов с поддельным API:
+# upstream_host = "127.0.0.1"
+# upstream_port = 9999
+# upstream_tls = false
+
+[limits]
+max_connections = 100       # всего одновременных соединений
+max_per_ip = 10             # с одного IP
+rate_per_sec = 5.0          # запросов в секунду на клиента
+burst = 10
+daily_budget = 10000        # запросов в сутки (UTC) на клиента
+max_body_bytes = 1048576    # 1 МБ; большие загрузки (sendDocument) пока не пройдут
+decoy_ban_seconds = 3600    # бан IP, с которого использовали приманку

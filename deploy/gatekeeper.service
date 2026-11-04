@@ -1,0 +1,59 @@
+# /etc/systemd/system/gatekeeper.service
+#
+# Подготовка (один раз, от root):
+#   useradd --system --home-dir /var/lib/gatekeeper --shell /usr/sbin/nologin gatekeeper
+#   install -d -o gatekeeper -g gatekeeper -m 0750 /etc/gatekeeper
+#   install -d -o gatekeeper -g gatekeeper -m 0700 /var/lib/gatekeeper
+#   install -o root -g root -m 0600 /dev/null /etc/gatekeeper/env
+#   echo 'GATEKEEPER_UPSTREAM_TOKEN=123456:ABC...' > /etc/gatekeeper/env
+#
+# Команды управления (init, add-client, freeze, revoke, renew, decoy-create) запускайте
+# от пользователя gatekeeper, чтобы файлы не стали принадлежать root:
+#   sudo -u gatekeeper /opt/gatekeeper/.venv/bin/gatekeeper freeze --id mybot
+#
+# ВНИМАНИЕ: юнит не проверялся на конкретном сервере. После установки посмотрите
+#   systemd-analyze security gatekeeper
+# и journalctl -u gatekeeper; при отказе запуска ослабляйте по одной настройке.
+
+[Unit]
+Description=gatekeeper API gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gatekeeper
+Group=gatekeeper
+EnvironmentFile=/etc/gatekeeper/env
+Environment=GATEKEEPER_CONFIG_DIR=/etc/gatekeeper
+Environment=GATEKEEPER_DATA_DIR=/var/lib/gatekeeper
+ExecStart=/opt/gatekeeper/.venv/bin/gatekeeper run
+Restart=on-failure
+RestartSec=3
+
+# Ограничения. Порт 8443 непривилегированный, поэтому capabilities не нужны.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+# Пишем только журнал и данные; конфигурацию шлюз только читает.
+ReadWritePaths=/var/lib/gatekeeper
+ReadOnlyPaths=/etc/gatekeeper
+
+[Install]
+WantedBy=multi-user.target

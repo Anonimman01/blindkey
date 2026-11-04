@@ -1,0 +1,24 @@
+# окружение и кэши
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# секреты: никогда не коммитить
+*.key
+*.secret
+master.secret
+client.key
+ca.key
+*.token
+.env
+env
+decoys.json
+clients.json
+*.bundle/
+*-bundle/
+audit.log*
+chain.head

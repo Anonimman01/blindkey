@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gatekeeper"
+version = "0.0.1"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Anonimman01"}]
+classifiers = ["License :: OSI Approved :: Apache Software License"]
+dependencies = ["cryptography>=42", "h11>=0.14"]
+
+[project.scripts]
+gatekeeper = "gatekeeper.cli.main:main"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
