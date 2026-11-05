@@ -19,11 +19,29 @@ _FILE_PATH_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_./-]{0,199}$")
 # Остальные шаблоны redact (/bot..., Bearer, PEM) нужны только для журнала: в ответах
 # они давали ложные срабатывания (/bothelp, «Bearer authentication»).
 _FULL_TOKEN_RE = re.compile(r"\d+:[A-Za-z0-9_-]{30,}")
+# Глубина вложенности JSON-ответа: ответы Bot API неглубокие. Лимит явный, чтобы блокировка
+# не зависела от recursion limit и версии интерпретатора (в 3.14 json.loads не падает на 100000).
+MAX_JSON_DEPTH = 64
+_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.S)
 _BODY_TYPES = frozenset({"application/json", "application/x-www-form-urlencoded", "multipart/form-data"})
 DOWNLOAD_METHOD = "downloadFile"
 # Long polling: потолок параметра timeout у getUpdates и запас сверх него на сеть.
 MAX_POLL_SECONDS = 50
 POLL_MARGIN = 10.0
+
+
+def _json_too_deep(text: str, limit: int = MAX_JSON_DEPTH) -> bool:
+    """True, если скобки вне строк вложены глубже limit. Строки пропускаются целиком."""
+    depth = 0
+    for m in _JSON_TOKEN_RE.finditer(text):
+        ch = m.group()
+        if ch in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif ch in "]}":
+            depth -= 1
+    return False
 
 
 class TelegramProvider(Provider):
@@ -101,6 +119,8 @@ class TelegramProvider(Provider):
             return None
         if ct.startswith("application/json"):
             # Токен мог прийти с JSON-экранированием (\u0041...): проверяем разобранные строки.
+            if _json_too_deep(text):
+                return None  # слишком глубокая вложенность: блокируем (fail closed)
             try:
                 data = json.loads(text)
             except ValueError:

@@ -119,3 +119,18 @@ def test_upstream_timeout_for_get_updates():
     assert p.upstream_timeout("getUpdates", b'{"timeout": 9999}') == 60.0  # потолок 50 + запас
     for bad in (b'{"timeout": -5}', b'{"timeout": "x"}', b'{"timeout": true}', b"not json", b"[1]"):
         assert p.upstream_timeout("getUpdates", bad) == 10.0
+
+
+def test_json_depth_limit_is_explicit():
+    from gatekeeper.server.providers.telegram import MAX_JSON_DEPTH
+    ok = b"[" * MAX_JSON_DEPTH + b"]" * MAX_JSON_DEPTH
+    too_deep = b"[" * (MAX_JSON_DEPTH + 1) + b"]" * (MAX_JSON_DEPTH + 1)
+    r = _json(ok)
+    assert prov().filter_response(r) is r
+    assert prov().filter_response(_json(too_deep)) is None
+
+
+def test_brackets_inside_strings_do_not_count_as_depth():
+    body = ('{"text":"' + "[" * 500 + '\\"' + "{" * 500 + '"}').encode()
+    r = _json(body)
+    assert prov().filter_response(r) is r
