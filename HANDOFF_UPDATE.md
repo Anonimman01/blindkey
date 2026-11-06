@@ -1,71 +1,39 @@
-# gatekeeper: актуальный статус (замена разделов 11 и 13 в HANDOFF.md)
+gatekeeper: актуальный статус (замена разделов 11 и 13 в HANDOFF.md)
+Проверено чтением кода и README (архив + github.com/Anonimman01/blindkey), тесты не запускались.
+Дата обновления: 2026-11-06.
 
-Проверено чтением кода, тесты не запускались.
+Статус
+Шаги 1-5 выполнены. Пункт 6 (v2) не начат.
+Тесты у владельца (2026-11-05): python -m pytest -q, 346 passed за 42.34 с, без пропусков и падений. Запуск на Windows/WSL.
 
-## Статус
-Шаги 1-6 из раздела 11 выполнены: core, audit, pki, CLI (init, add-client, list-clients,
-audit-verify, decoy-create, run), mTLS-сервер, pipeline, провайдер telegram, upstream,
-config, app, клиент (Session, Transport, BotApi), приманки, интеграционные тесты
-(fake_telegram). README заявляет 293 passed, 2 skipped. Нужна проверка на стороне владельца.
+Выполнено
+- Шаги 1-6 исходного плана (раздел 11): core, audit, pki, CLI (init, add-client, list-clients, audit-verify, decoy-create, run), mTLS-сервер, pipeline, провайдер telegram, upstream, config, app, клиент (Session, Transport, BotApi), приманки, интеграционные тесты (fake_telegram).
+- Пункт 1: фильтр ответа. Блокировка только по точным секретам и полному шаблону токена \d+:[\w-]{30,}; остальные шаблоны redact только для журнала. Тесты у владельца прошли (314 passed).
+- Пункт 2: замок журнала между процессами (FileSink.locked(), пересинхронизация хвоста в AuditChain.append, verify_file читает снимок под замком).
+- Пункт 3: getUpdates (providers/telegram.py, client/botapi.py, README). Таймаут upstream = timeout запроса + запас; метод разрешается одному клиенту.
+- Пункт 4: freeze / unfreeze / revoke / renew (cli/commands/client_status.py, renew.py, main.py, README). Действуют сразу, перезапуск шлюза не нужен. Сквозной тест «после revoke 403 без перезапуска» есть в tests/integration/test_end_to_end.py.
+- Пункт 5: негативные TLS-тесты (tests/integration/test_tls_negative.py, 7 тестов), запись неудачных рукопожатий в журнал (DENY_TLS_HANDSHAKE в server/app.py), блокировка Registry (_locked в add/set_status/renew) и тест параллельных add, LICENSE и NOTICE в корне, SECURITY.md (private vulnerability reporting), docs/threat-model.md, deploy/gatekeeper.service, .gitignore, pyproject.toml (license, authors), CI (.github/workflows/ci.yml: ubuntu + windows, Python 3.13 и 3.14, requirements.lock с хэшами).
 
-## Выполнено после этого обзора
-- Пункт 1 (фильтр ответа): сделан, тесты у владельца прошли (314 passed).
-- Пункт 2 (замок журнала): сделан, ждёт прогона тестов у владельца. FileSink.locked(), пересинхронизация
-  хвоста в AuditChain.append, verify_file читает снимок под замком.
+Пункт 6 (v2): не начат
+Ни в архиве, ни в репозитории нет кода или заготовок v2.
+Состав:
+- автозаморозка по аномалиям;
+- подтверждение опасных действий;
+- якоря журнала (сейчас удаление хвоста вместе с chain.head не обнаруживается);
+- ротация ключей;
+- провайдер bearer;
+- очереди getUpdates на стороне шлюза.
 
-## Обновление от 2026-11-04 (чтение кода и README, тесты не запускались)
-- Пункт 3 (getUpdates): в коде есть (providers/telegram.py, client/botapi.py, README). Тесты у владельца: не подтверждено.
-- Пункт 4 (freeze / unfreeze / revoke / renew): в коде есть (cli/commands/client_status.py, renew.py, main.py, README).
-  Сквозной тест «после revoke 403 без перезапуска»: проверить, есть ли в tests/integration/test_end_to_end.py.
-- Пункт 5, часть без кода сделана: .gitignore, deploy/gatekeeper.service (не проверен на сервере),
-  SECURITY.md (в нём TODO: контакт), docs/threat-model.md.
-- Пункт 5, осталось: негативные тесты (просроченный и отозванный сертификат, верный сертификат с чужой подписью
-  и наоборот, откат на TLS 1.2), запись неудачных TLS-рукопожатий в журнал, LICENSE, CI, блокировка в Registry._save.
-- Файлы step2/step3/step4 *.patch уже применены, их можно удалить.
-- Исходного HANDOFF.md в этом архиве нет, только HANDOFF_UPDATE.md.
+Не проверено
+- deploy/gatekeeper.service на реальном сервере.
+- Зелёный CI на GitHub (ubuntu + windows, Python 3.13 и 3.14): локальный прогон прошёл, результат CI не подтверждён.
 
-## Обновление от 2026-11-04 (вечер, тесты не запускались)
-- Негативные TLS-тесты уже были: tests/integration/test_tls_negative.py (7 тестов) + revoke в test_end_to_end.py.
-- Запись неудачных рукопожатий в журнал уже есть (DENY_TLS_HANDSHAKE в server/app.py).
-- Блокировка Registry уже есть (_locked в add/set_status/renew); добавлен тест параллельных add.
-- LICENSE, NOTICE перенесены в корень, SECURITY.md без TODO (private vulnerability reporting),
-  pyproject.toml с license/authors. Папка lic/ удалена.
-- Добавлен .github/workflows/ci.yml (ubuntu + windows, Python 3.13 и 3.14, requirements.lock с хэшами).
-- Пункт 5 закрыт при условии зелёного pytest и CI. Дальше: пункт 6 (v2) или остановка (вопрос учебный/реальный).
+Долги в документации
+- Закрыто: неверная строка про TLS-рукопожатия была в docs/threat-model.md (не в README), исправлена.
+- Закрыто: число тестов в README обновлено до «346 passed» (правка в рабочем каталоге, на момент проверки не закоммичена).
+- Файлов step2/step3/step4 *.patch в индексе git нет.
+- Исходного HANDOFF.md в архиве нет, только HANDOFF_UPDATE.md.
 
-## Найденные проблемы (по убыванию важности; пункты 1-4 ниже уже закрыты, список исторический)
-1. Фильтр ответа (providers/telegram.py: filter_response) использует шаблоны redact.
-   Блокирует нормальный текст: `/bothelp` (шаблон `(?<=/bot)...`), «Bearer authentication».
-   Следствия: 502 после реально доставленного sendMessage (дубли при повторе), «отравленный»
-   апдейт блокирует весь getUpdates.
-   Исправление: блокировать только по точным секретам (токен, его части, JSON-экранирование)
-   и полному шаблону токена `\d+:[\w-]{30,}`; остальные шаблоны только для журнала.
-2. Журнал не безопасен между процессами. Сервер держит _next_seq/_last_hash в памяти,
-   add-client и decoy-create пишут своим AuditChain. Итог: ложная «подмена» в audit-verify
-   и отказ шлюза стартовать (verify_on_open).
-   Исправление: межпроцессная блокировка + пересинхронизация хвоста журнала под замком.
-   Делать до новых команд CLI, пишущих в журнал.
-3. Нет getUpdates: таймауты upstream и клиента по 30 с рвут long polling.
-   MVP-вариант: таймаут upstream = параметр timeout запроса + запас, BotApi.get_updates(),
-   getUpdates разрешать одному клиенту. Опрос на стороне шлюза с очередями это v2.
-4. Нет freeze/unfreeze/revoke/renew (Registry.set_status и события CLIENT_FROZEN/REVOKED
-   уже есть, но не используются). Сертификат 90 дней, продлить или удалить клиента нельзя.
-5. Мелочи: нет .gitignore (в архиве .venv и .pytest_cache), LICENSE, SECURITY.md,
-   docs/threat-model, deploy/gatekeeper.service, CI. Нет сквозных тестов: просроченный и
-   отозванный сертификат, верный сертификат с чужой подписью. Неудачные TLS-рукопожатия
-   не пишутся в журнал. Registry._save без блокировки.
-
-## Порядок работ (один пункт = один небольшой шаг)
-1. Фильтр ответа + тесты (`/bothelp`, «Bearer authentication», токен в теле).
-2. Блокировка журнала между процессами + тест с двумя AuditChain.
-3. getUpdates (минимальный вариант).
-4. freeze / unfreeze / revoke / renew + сквозной тест «после revoke 403 без перезапуска».
-5. Недостающие негативные тесты, .gitignore, systemd-юнит, SECURITY.md, threat-model.
-6. v2: автозаморозка, подтверждения, якоря журнала, ротация ключей, провайдер bearer.
-
-## Открытый вопрос
-Проект учебный или под реальную задачу? От ответа зависит, останавливаться ли на пункте 5.
-
-## Следующий шаг
-Пункт 5: негативные сквозные тесты (сертификаты и TLS), затем запись неудачных рукопожатий в журнал.
-Сначала владелец прогоняет pytest на текущем состоянии (после пунктов 2-4) и присылает итог.
+Следующий шаг
+Выбрать первый подпункт v2 или остановиться на пункте 5.
+Открытый вопрос: проект учебный или под реальную задачу? От ответа зависит, нужен ли v2. Если под реальную задачу, первыми разумно брать якоря журнала и автозаморозку.
