@@ -47,6 +47,8 @@ def test_case_sensitive():
         "https://api.telegram.org/sendMessage",
         "/sendMessage\r\nHost: evil",
         "/sendMessage ",
+        "/sendMessage\n",                   # завершающий \n (раньше $ его пропускал)
+        "/sendMessage\r",                   # завершающий \r
         "/sendMessage\x00",
         "/sendMessageé",
         "/" + "a" * 500,
@@ -76,7 +78,7 @@ def test_empty_policy_denies_everything():
 @pytest.mark.parametrize(
     "bad",
     ["", "POST", "POST:", ":sendMessage", "post:sendMessage", "PUT:sendMessage",
-     "POST:send Message", "POST:../x", "POST:a/b", "POST:1abc", "POST:a:b", None, 5],
+     "POST:send Message", "POST:../x", "POST:a/b", "POST:1abc", "POST:a:b", "POST:sendMessage\n", "POST:sendMessage\r", None, 5],
 )
 def test_parse_rule_rejects_bad(bad):
     with pytest.raises(PolicyError):

@@ -9,7 +9,7 @@
     python -m venv .venv
     pip install --require-hashes -r requirements.lock
     pip install -e .
-    python -m pytest          # 346 passed
+    python -m pytest          # 350 passed
 
 ## Запуск на сервере (Linux)
 
