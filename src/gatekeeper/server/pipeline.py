@@ -17,6 +17,7 @@ from gatekeeper.core.events import EventType, Severity
 from gatekeeper.core.kdf import derive_signing_key
 from gatekeeper.core.signing import build_canonical_string, verify
 from gatekeeper.core.timeutil import is_fresh, unix_now
+from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.http_io import ParsedRequest
 from gatekeeper.server.http_response import build_response, neutral_response
@@ -42,10 +43,13 @@ class Pipeline:
                  budget: DailyBudget, bans: IpBanList,
                  decoy_check: Callable[[str], bool] | None = None,
                  decoy_ban_seconds: int = 3600,
+                 anomalies: AnomalyMonitor | None = None,
+                 freeze_client: Callable[[str], None] | None = None,
                  clock: Callable[[], int] = unix_now) -> None:
         self.identity, self.provider, self.upstream, self.audit = identity, provider, upstream, audit
         self.nonces, self.client_limiter, self.budget, self.bans = nonces, client_limiter, budget, bans
         self.decoy_check, self.decoy_ban_seconds, self.clock = decoy_check, decoy_ban_seconds, clock
+        self.anomalies, self.freeze_client = anomalies, freeze_client
 
     async def _log(self, etype, data: dict, sev: Severity = Severity.INFO) -> None:
         await asyncio.to_thread(self.audit.append, etype, data, sev)
@@ -53,7 +57,24 @@ class Pipeline:
     async def _deny(self, etype: EventType, status: int, reason: str, ip: str,
                     client: str | None = None, sev: Severity = Severity.WARNING) -> bytes:
         await self._log(etype, {"reason": reason, "ip": ip, "client": client}, sev)
+        if client is not None and self.anomalies is not None:
+            await self._maybe_autofreeze(client, etype, ip)
         return neutral_response(status)
+
+    async def _maybe_autofreeze(self, client: str, etype, ip: str) -> None:
+        """Порог аномалий достигнут: замораживаем клиента (как `gatekeeper freeze`)."""
+        count = self.anomalies.record(client, etype)
+        if count is None or self.freeze_client is None:
+            return
+        try:
+            await asyncio.to_thread(self.freeze_client, client)
+        except Exception as exc:  # уже frozen/revoked или сбой реестра: не ломаем ответ
+            await self._log("autofreeze_failed", {"client": client, "error": type(exc).__name__},
+                            Severity.ALERT)
+            return
+        await self._log(EventType.CLIENT_FROZEN,
+                        {"client": client, "auto": True, "trigger": getattr(etype, "value", str(etype)),
+                         "count": count, "window": self.anomalies.window, "ip": ip}, Severity.ALERT)
 
     async def handle(self, req: ParsedRequest, ip: str, peer_der: bytes | None) -> bytes:
         try:

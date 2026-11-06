@@ -32,6 +32,9 @@ class Config:
     decoy_ban_seconds: int = 3600
     header_timeout: float = 10.0
     body_timeout: float = 30.0
+    # Автозаморозка: 0 = выключена. Иначе N отказов (подпись/повтор/политика) за T секунд.
+    autofreeze_threshold: int = 0
+    autofreeze_window: int = 60
 
 
 _SCHEMA = {
@@ -45,6 +48,7 @@ _SCHEMA = {
         "daily_budget": int, "max_body_bytes": int, "decoy_ban_seconds": int,
         "header_timeout": float, "body_timeout": float,
     },
+    "anomaly": {"autofreeze_threshold": int, "autofreeze_window": int},
 }
 
 
@@ -93,4 +97,6 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError("timeouts must be positive")
     if cfg.rate_per_sec <= 0 or cfg.decoy_ban_seconds < 0:
         raise ConfigError("invalid rate_per_sec or decoy_ban_seconds")
+    if cfg.autofreeze_threshold < 0 or cfg.autofreeze_window <= 0:
+        raise ConfigError("autofreeze_threshold must be >= 0 and autofreeze_window > 0")
     return cfg

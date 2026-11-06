@@ -246,3 +246,28 @@ def test_renew_refused_for_revoked_or_unknown(gw):
         assert main(gw.base + ["renew", "--id", cid, "--ca-key", str(gw.cakey), "--out", str(out)]) == 1
         assert not out.exists()
     assert main(gw.base + ["freeze", "--id", "nobody"]) == 1
+
+
+def test_autofreeze_over_real_mtls(gw):
+    port = free_port()
+    gw.layout.config_file.write_text(
+        f'[server]\nlisten_host="127.0.0.1"\nlisten_port={port}\n'
+        f'[provider]\nname="telegram"\nupstream_host="127.0.0.1"\nupstream_port={gw.fake.port}\n'
+        f'upstream_tls=false\n[anomaly]\nautofreeze_threshold=3\nautofreeze_window=60\n', encoding="utf-8")
+    server = Server(build_app(gw.layout, load_config(gw.layout.config_file)), port)
+    server.start()
+    try:
+        a = BotApi(str(gw.bundle), "127.0.0.1", port)
+        assert a.get_me()["ok"]
+        for _ in range(3):  # подписанные запросы вне белого списка = deny_policy
+            with pytest.raises(GatewayError) as e:
+                a.call("deleteWebhook", {})
+            assert e.value.status == 403
+        assert _status(gw) == "frozen"
+        with pytest.raises(GatewayError):
+            a.get_me()  # заморожен, хотя запрос корректен
+    finally:
+        server.stop()
+    log = gw.layout.audit_log.read_text()
+    assert '"auto":true' in log.replace(" ", "") and "client_frozen" in log
+    assert main(gw.base + ["unfreeze", "--id", "alice"]) == 0

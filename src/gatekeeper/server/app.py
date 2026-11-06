@@ -8,6 +8,7 @@ from gatekeeper.core.events import EventType
 from gatekeeper.pki import ca as pki_ca
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink
+from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.config import Config
 from gatekeeper.server.honey.decoys import DecoyStore
 from gatekeeper.server.http_io import HttpError, HttpLimits, read_request
@@ -124,14 +125,17 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     audit = AuditChain(FileSink(layout.audit_log), secrets=provider.known_secrets())
     bans = IpBanList()
     ca_cert = pki_ca.load_cert_pem(layout.ca_cert.read_bytes())
+    registry = Registry(layout.clients_file)
     pipeline = Pipeline(
-        identity=IdentityStore(Registry(layout.clients_file), ca_cert),
+        identity=IdentityStore(registry, ca_cert),
         provider=provider,
         upstream=Upstream(provider.host, provider.port, use_tls=cfg.upstream_tls),
         audit=audit, nonces=NonceCache(),
         client_limiter=RateLimiter(cfg.rate_per_sec, cfg.burst),
         budget=DailyBudget(cfg.daily_budget), bans=bans,
-        decoy_check=DecoyStore(layout.decoys_file).is_decoy, decoy_ban_seconds=cfg.decoy_ban_seconds)
+        decoy_check=DecoyStore(layout.decoys_file).is_decoy, decoy_ban_seconds=cfg.decoy_ban_seconds,
+        anomalies=AnomalyMonitor(cfg.autofreeze_threshold, cfg.autofreeze_window),
+        freeze_client=lambda cid: registry.set_status(cid, "frozen"))
     return GatekeeperApp(
         pipeline=pipeline, bans=bans,
         limiter=ConnectionLimiter(cfg.max_connections, cfg.max_per_ip), audit=audit,
