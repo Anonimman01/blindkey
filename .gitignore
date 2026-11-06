@@ -22,3 +22,6 @@ clients.json
 *-bundle/
 audit.log*
 chain.head
+
+# локальные проверочные скрипты
+check_gw.py

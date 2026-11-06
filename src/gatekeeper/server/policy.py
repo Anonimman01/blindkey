@@ -35,7 +35,7 @@ def parse_rule(text: object) -> Rule:
     method, sep, name = text.partition(":")
     if not sep or method not in ALLOWED_HTTP_METHODS:
         raise PolicyError("rule has unsupported method")
-    if not _API_NAME_RE.match(name):
+    if not _API_NAME_RE.fullmatch(name):
         raise PolicyError("rule has invalid api name")
     return Rule(method, name)
 
@@ -77,7 +77,7 @@ class Policy:
         if not target.startswith("/"):
             return None
         name = target[1:]
-        if not _API_NAME_RE.match(name):
+        if not _API_NAME_RE.fullmatch(name):
             return None
         rule = self._index.get((http_method, name))
         if rule is None:
