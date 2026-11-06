@@ -35,6 +35,7 @@ class GatekeeperApp:
         self.http_limits, self.ssl_ctx, self.host, self.port = http_limits, ssl_ctx, host, port
         self._malformed_log = RateLimiter(rate_per_sec=1.0, burst=5)  # защита журнала от флуда
         self._tls_log = RateLimiter(rate_per_sec=1.0, burst=5)
+        self._conn_tasks: set[asyncio.Task] = set()  # живые обработчики соединений
 
     async def _handshake(self, writer: asyncio.StreamWriter, ip: str) -> bool:
         """mTLS-рукопожатие. Неудача пишется в журнал (с лимитом на IP) и закрывает соединение."""
@@ -54,6 +55,13 @@ class GatekeeperApp:
             return False
 
     async def _on_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._conn_tasks.add(task)
+            task.add_done_callback(self._conn_tasks.discard)
+        await self._handle_conn(reader, writer)
+
+    async def _handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
         ip = peer[0] if peer else "unknown"
         acquired = False
@@ -96,7 +104,18 @@ class GatekeeperApp:
                                     {"action": "run", "listen": f"{self.host}:{self.port}"})
             if on_started is not None:
                 on_started()
-            await server.serve_forever()
+            try:
+                await server.serve_forever()
+            finally:
+                await self._cancel_conn_tasks()
+
+    async def _cancel_conn_tasks(self) -> None:
+        """При остановке отменяем незавершённые соединения и дожидаемся их закрытия."""
+        tasks = list(self._conn_tasks)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
