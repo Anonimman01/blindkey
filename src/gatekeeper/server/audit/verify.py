@@ -5,8 +5,10 @@ import json
 import os
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import Sequence
 
 from gatekeeper.core.errors import AuditError
+from gatekeeper.server.audit.anchor import Anchor, check_anchors
 from gatekeeper.server.audit.chain import (
     GENESIS_HASH,
     RECORD_KEYS,
@@ -26,6 +28,7 @@ class VerifyResult:
     error: str | None = None
     line_no: int | None = None  # номер строки с первой ошибкой (с 1)
     head_checked: bool = False  # сверена ли голова из chain.head
+    anchors_checked: int = 0  # сколько внешних якорей сошлось с журналом
 
 
 def _fail(msg: str, line_no: int | None, count: int = 0, **kw) -> VerifyResult:
@@ -76,9 +79,13 @@ def verify_lines(
 
 
 def verify_file(
-    path: str | os.PathLike, head_path: str | os.PathLike | None = None, *, lock: bool = True
+    path: str | os.PathLike,
+    head_path: str | os.PathLike | None = None,
+    *,
+    lock: bool = True,
+    anchors: Sequence[Anchor] | None = None,
 ) -> VerifyResult:
-    """Проверить файл журнала и (если есть) сверить голову из chain.head.
+    """Проверить файл журнала, голову из chain.head (если есть) и внешние якоря (если даны).
 
     lock=True: журнал и голова читаются одним снимком под замком, поэтому запись шлюза
     посреди проверки не даёт ложной «подмены». Замок только на чтение файлов; сама проверка
@@ -103,14 +110,20 @@ def verify_file(
         return result
     if head_exc is not None:
         return _fail(str(head_exc), None, result.count)
-    if head is None:
-        return result  # head_checked=False
-    hseq, hhash = head
-    if hseq > result.last_seq:
-        return _fail("log is shorter than chain.head (tail removed)", None, result.count)
-    if hashes[hseq] != hhash:
-        return _fail("chain.head does not match log", None, result.count)
-    # hseq < last_seq допустимо: сбой между записью строки и обновлением head.
+    head_checked = False
+    if head is not None:
+        hseq, hhash = head
+        if hseq > result.last_seq:
+            return _fail("log is shorter than chain.head (tail removed)", None, result.count)
+        if hashes[hseq] != hhash:
+            return _fail("chain.head does not match log", None, result.count)
+        # hseq < last_seq допустимо: сбой между записью строки и обновлением head.
+        head_checked = True
+    if anchors:
+        err = check_anchors(list(anchors), hashes)
+        if err is not None:
+            return _fail(err, None, result.count)
     return VerifyResult(
-        True, result.count, result.last_seq, result.last_hash, head_checked=True
+        True, result.count, result.last_seq, result.last_hash,
+        head_checked=head_checked, anchors_checked=len(anchors or ()),
     )

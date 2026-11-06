@@ -6,7 +6,7 @@ import sys
 
 from gatekeeper.cli import output
 from gatekeeper.cli.commands import (
-    add_client, audit_verify, client_status, decoy_create, init, list_clients, renew, run,
+    add_client, audit_anchor, audit_verify, client_status, decoy_create, init, list_clients, renew, run,
 )
 from gatekeeper.store.layout import Layout
 
@@ -48,7 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=list_clients.run)
 
     s = sub.add_parser("audit-verify")
+    s.add_argument("--anchors", help="файл внешних якорей (см. audit-anchor): сверить журнал и с ними")
     s.set_defaults(func=audit_verify.run)
+
+    s = sub.add_parser("audit-anchor", help="проверить журнал и выдать якорь его головы")
+    s.add_argument("--out", help="дописать якорь в этот файл (держите его вне каталога данных шлюза)")
+    s.set_defaults(func=audit_anchor.run)
 
     s = sub.add_parser("decoy-create", help="создать приманку (фальшивый пакет клиента)")
     s.add_argument("--name", required=True)
