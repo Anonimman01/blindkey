@@ -19,6 +19,10 @@ _API_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _MAX_TARGET_LEN = 128
 
 
+def is_valid_api_name(name: object) -> bool:
+    return isinstance(name, str) and _API_NAME_RE.fullmatch(name) is not None
+
+
 @dataclass(frozen=True)
 class Rule:
     http_method: str

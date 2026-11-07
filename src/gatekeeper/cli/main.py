@@ -6,7 +6,8 @@ import sys
 
 from gatekeeper.cli import output
 from gatekeeper.cli.commands import (
-    add_client, audit_anchor, audit_verify, client_status, decoy_create, init, list_clients, renew, run,
+    add_client, audit_anchor, audit_verify, client_status, confirm, decoy_create, init, list_clients,
+    renew, run,
 )
 from gatekeeper.store.layout import Layout
 
@@ -43,6 +44,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", required=True, help="каталог для нового пакета")
     s.add_argument("--days", type=int, default=90)
     s.set_defaults(func=renew.run)
+
+    s = sub.add_parser("pending", help="заявки на подтверждение опасных действий")
+    s.set_defaults(func=confirm.pending)
+
+    for name, fn, text in (("approve", confirm.approve, "подтвердить заявку (одноразово, на ограниченное время)"),
+                           ("reject", confirm.reject, "отклонить заявку или отозвать подтверждение")):
+        s = sub.add_parser(name, help=text)
+        s.add_argument("--id", required=True, help="идентификатор из `gatekeeper pending` (хотя бы 6 символов)")
+        s.set_defaults(func=fn)
 
     s = sub.add_parser("list-clients")
     s.set_defaults(func=list_clients.run)

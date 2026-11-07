@@ -17,6 +17,7 @@ class EventType(str, Enum):
     DENY_BUDGET = "deny_budget"
     DENY_MALFORMED = "deny_malformed"
     DENY_TLS_HANDSHAKE = "deny_tls_handshake"
+    DENY_CONFIRM_REQUIRED = "deny_confirm_required"  # опасный метод ждёт подтверждения
     # Тревоги
     DECOY_TRIGGERED = "decoy_triggered"
     RESPONSE_SECRET_BLOCKED = "response_secret_blocked"
@@ -26,6 +27,8 @@ class EventType(str, Enum):
     CLIENT_UNFROZEN = "client_unfrozen"
     CLIENT_REVOKED = "client_revoked"
     CLIENT_RENEWED = "client_renewed"
+    CONFIRM_APPROVED = "confirm_approved"
+    CONFIRM_REJECTED = "confirm_rejected"
     SERVER_STARTED = "server_started"
 
 

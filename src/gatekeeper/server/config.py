@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gatekeeper.core.errors import GatekeeperError
+from gatekeeper.server.policy import is_valid_api_name
 
 
 class ConfigError(GatekeeperError):
@@ -35,6 +36,10 @@ class Config:
     # Автозаморозка: 0 = выключена. Иначе N отказов (подпись/повтор/политика) за T секунд.
     autofreeze_threshold: int = 0
     autofreeze_window: int = 60
+    # Подтверждение опасных действий: методы API, которые выполняются только после
+    # `gatekeeper approve`. Пусто = выключено. ttl: сколько секунд живёт заявка/подтверждение.
+    confirm_apis: tuple[str, ...] = ()
+    confirm_ttl: int = 300
 
 
 _SCHEMA = {
@@ -49,11 +54,19 @@ _SCHEMA = {
         "header_timeout": float, "body_timeout": float,
     },
     "anomaly": {"autofreeze_threshold": int, "autofreeze_window": int},
+    "confirm": {"apis": list, "ttl": int},
 }
+# (секция, ключ) -> поле Config, если имя отличается от ключа
+_FIELD = {("provider", "name"): "provider", ("confirm", "apis"): "confirm_apis",
+          ("confirm", "ttl"): "confirm_ttl"}
 
 
 def _check_type(section: str, key: str, value: object, typ: type) -> object:
-    if typ is float:
+    if typ is list:
+        ok = isinstance(value, list) and all(isinstance(x, str) for x in value)
+        if ok:
+            return tuple(value)
+    elif typ is float:
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     elif typ is int:
         ok = isinstance(value, int) and not isinstance(value, bool)
@@ -84,9 +97,7 @@ def load_config(path: str | Path) -> Config:
             raise ConfigError(f"[{section}] unknown key(s): {sorted(extra)}")
         for key, typ in keys.items():
             if key in sec:
-                flat["provider" if (section, key) == ("provider", "name") else key] = (
-                    _check_type(section, key, sec[key], typ)
-                )
+                flat[_FIELD.get((section, key), key)] = _check_type(section, key, sec[key], typ)
     cfg = Config(**flat)
     if not 1 <= cfg.listen_port <= 65535 or not 1 <= cfg.upstream_port <= 65535:
         raise ConfigError("port out of range")
@@ -99,4 +110,8 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError("invalid rate_per_sec or decoy_ban_seconds")
     if cfg.autofreeze_threshold < 0 or cfg.autofreeze_window <= 0:
         raise ConfigError("autofreeze_threshold must be >= 0 and autofreeze_window > 0")
+    if not all(is_valid_api_name(a) for a in cfg.confirm_apis):
+        raise ConfigError("[confirm] apis: invalid api name")
+    if not 1 <= cfg.confirm_ttl <= 86400:
+        raise ConfigError("[confirm] ttl must be between 1 and 86400")
     return cfg

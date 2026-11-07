@@ -20,6 +20,7 @@ from gatekeeper.server.pipeline import Pipeline
 from gatekeeper.server.providers import create_provider
 from gatekeeper.server.tls import build_server_context, peer_cert_der
 from gatekeeper.server.upstream import Upstream
+from gatekeeper.store.approvals import Approvals
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry
 from gatekeeper.store.secrets import load_secret
@@ -135,7 +136,9 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
         budget=DailyBudget(cfg.daily_budget), bans=bans,
         decoy_check=DecoyStore(layout.decoys_file).is_decoy, decoy_ban_seconds=cfg.decoy_ban_seconds,
         anomalies=AnomalyMonitor(cfg.autofreeze_threshold, cfg.autofreeze_window),
-        freeze_client=lambda cid: registry.set_status(cid, "frozen"))
+        freeze_client=lambda cid: registry.set_status(cid, "frozen"),
+        approvals=Approvals(layout.approvals_file, cfg.confirm_ttl) if cfg.confirm_apis else None,
+        confirm_apis=frozenset(cfg.confirm_apis))
     return GatekeeperApp(
         pipeline=pipeline, bans=bans,
         limiter=ConnectionLimiter(cfg.max_connections, cfg.max_per_ip), audit=audit,

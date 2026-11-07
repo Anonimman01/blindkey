@@ -271,3 +271,37 @@ def test_autofreeze_over_real_mtls(gw):
     log = gw.layout.audit_log.read_text()
     assert '"auto":true' in log.replace(" ", "") and "client_frozen" in log
     assert main(gw.base + ["unfreeze", "--id", "alice"]) == 0
+
+
+def test_confirm_over_real_mtls(gw, capsys):
+    port = free_port()
+    gw.layout.config_file.write_text(
+        f'[server]\nlisten_host="127.0.0.1"\nlisten_port={port}\n'
+        f'[provider]\nname="telegram"\nupstream_host="127.0.0.1"\nupstream_port={gw.fake.port}\n'
+        f'upstream_tls=false\n[confirm]\napis=["sendMessage"]\nttl=60\n', encoding="utf-8")
+    server = Server(build_app(gw.layout, load_config(gw.layout.config_file)), port)
+    server.start()
+    try:
+        a = BotApi(str(gw.bundle), "127.0.0.1", port)
+        assert a.get_me()["ok"]                      # метод вне [confirm] работает как раньше
+        payload = {"chat_id": 1, "text": "dangerous"}
+        with pytest.raises(GatewayError) as e:
+            a.call("sendMessage", payload)
+        assert e.value.status == 403                 # заявка создана, ответ нейтральный
+        capsys.readouterr()
+        assert main(gw.base + ["pending"]) == 0
+        out = capsys.readouterr().out
+        rid = out.split()[0]
+        assert "alice" in out and "sendMessage" in out and "dangerous" in out
+        with pytest.raises(GatewayError):
+            a.call("sendMessage", payload)           # без approve по-прежнему 403
+        assert main(gw.base + ["approve", "--id", rid]) == 0
+        with pytest.raises(GatewayError):
+            a.call("sendMessage", {"chat_id": 1, "text": "changed"})   # другое тело не проходит
+        assert a.call("sendMessage", payload)["ok"]  # без перезапуска шлюза
+        with pytest.raises(GatewayError):
+            a.call("sendMessage", payload)           # подтверждение одноразовое
+    finally:
+        server.stop()
+    log = gw.layout.audit_log.read_text()
+    assert "deny_confirm_required" in log and "confirm_approved" in log and '"confirmed"' in log

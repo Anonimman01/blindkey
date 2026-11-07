@@ -39,3 +39,5 @@ class Layout:
     def audit_log(self) -> Path: return self.audit_dir / "audit.log"
     @property
     def decoys_file(self) -> Path: return self.data_dir / "decoys.json"
+    @property
+    def approvals_file(self) -> Path: return self.data_dir / "approvals.json"

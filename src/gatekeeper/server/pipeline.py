@@ -15,6 +15,7 @@ from gatekeeper.core import constants
 from gatekeeper.core.errors import SigningError
 from gatekeeper.core.events import EventType, Severity
 from gatekeeper.core.kdf import derive_signing_key
+from gatekeeper.core.redact import redact_text
 from gatekeeper.core.signing import build_canonical_string, verify
 from gatekeeper.core.timeutil import is_fresh, unix_now
 from gatekeeper.server.anomaly import AnomalyMonitor
@@ -26,6 +27,7 @@ from gatekeeper.server.limits import DailyBudget, IpBanList, RateLimiter
 from gatekeeper.server.nonce_cache import NonceCache
 from gatekeeper.server.providers.base import Provider, ProviderError
 from gatekeeper.server.upstream import Upstream, UpstreamError
+from gatekeeper.store.approvals import Approvals, make_preview
 
 _H = {k: getattr(constants, f"HEADER_{k.upper()}").lower() for k in ("client", "epoch", "time", "nonce", "sig")}
 _PASSTHROUGH = frozenset({400, 401, 403, 404, 409, 429, 500, 502, 503})
@@ -45,11 +47,14 @@ class Pipeline:
                  decoy_ban_seconds: int = 3600,
                  anomalies: AnomalyMonitor | None = None,
                  freeze_client: Callable[[str], None] | None = None,
+                 approvals: Approvals | None = None,
+                 confirm_apis: frozenset[str] = frozenset(),
                  clock: Callable[[], int] = unix_now) -> None:
         self.identity, self.provider, self.upstream, self.audit = identity, provider, upstream, audit
         self.nonces, self.client_limiter, self.budget, self.bans = nonces, client_limiter, budget, bans
         self.decoy_check, self.decoy_ban_seconds, self.clock = decoy_check, decoy_ban_seconds, clock
         self.anomalies, self.freeze_client = anomalies, freeze_client
+        self.approvals, self.confirm_apis = approvals, frozenset(confirm_apis)
 
     async def _log(self, etype, data: dict, sev: Severity = Severity.INFO) -> None:
         await asyncio.to_thread(self.audit.append, etype, data, sev)
@@ -75,6 +80,24 @@ class Pipeline:
         await self._log(EventType.CLIENT_FROZEN,
                         {"client": client, "auto": True, "trigger": getattr(etype, "value", str(etype)),
                          "count": count, "window": self.anomalies.window, "ip": ip}, Severity.ALERT)
+
+    async def _confirm(self, cid: str, decision, req: ParsedRequest, ip: str) -> tuple[str | None, bytes | None]:
+        """Опасный метод: (id подтверждения, None) если подтверждён, иначе (None, ответ-отказ).
+
+        Подтверждение расходуется здесь же. Если следом сработает дневной бюджет, подтверждение
+        пропадёт, и оператору придётся подтвердить заново.
+        """
+        api = decision.api_name
+        text = req.body.decode("utf-8", "replace")
+        preview = make_preview(redact_text(text, self.provider.known_secrets()))
+        res = await asyncio.to_thread(
+            self.approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip)
+        if res.state == "approved":
+            return res.id, None
+        reason = {"new": f"confirm_new:{res.id}", "pending": f"confirm_pending:{res.id}",
+                  "full": "confirm_queue_full"}[res.state]
+        sev = Severity.ALERT if res.state in ("new", "full") else Severity.WARNING
+        return None, await self._deny(EventType.DENY_CONFIRM_REQUIRED, 403, reason, ip, cid, sev)
 
     async def handle(self, req: ParsedRequest, ip: str, peer_der: bytes | None) -> bytes:
         try:
@@ -123,6 +146,11 @@ class Pipeline:
             return await self._deny(EventType.DENY_POLICY, 403, "not_allowed", ip, cid)
         if not self.client_limiter.allow(cid):
             return await self._deny(EventType.DENY_RATE_LIMIT, 429, "rate", ip, cid)
+        confirmed = None
+        if self.approvals is not None and decision.api_name in self.confirm_apis:
+            confirmed, refusal = await self._confirm(cid, decision, req, ip)
+            if refusal is not None:
+                return refusal
         if not self.budget.try_spend(cid):
             return await self._deny(EventType.DENY_BUDGET, 429, "daily_budget", ip, cid)
 
@@ -149,7 +177,8 @@ class Pipeline:
             return neutral_response(502)
         status = safe.status if (200 <= safe.status < 300 or safe.status in _PASSTHROUGH) else 502
         await self._log(EventType.REQUEST_OK,
-                        {"client": cid, "api": api, "ip": ip, "status": status, "bytes": len(safe.body)})
+                        {"client": cid, "api": api, "ip": ip, "status": status, "bytes": len(safe.body),
+                         **({"confirmed": confirmed} if confirmed else {})})
         try:
             return build_response(status, safe.body, safe.content_type)
         except ValueError:
