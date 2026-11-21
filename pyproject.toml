@@ -1,4 +1,4 @@
-﻿[build-system]
+[build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "gatekeeper"
 version = "0.2.0"
 requires-python = ">=3.11"
-description = "mTLS-С€Р»СЋР· РґР»СЏ Telegram Bot API Рё GitHub: С‚РѕРєРµРЅ С‚РѕР»СЊРєРѕ РЅР° С€Р»СЋР·Рµ, РїРѕРґРїРёСЃСЊ Р·Р°РїСЂРѕСЃРѕРІ, Р¶СѓСЂРЅР°Р» СЃ С†РµРїРѕС‡РєРѕР№ С…РµС€РµР№"
+description = "mTLS-шлюз для Telegram Bot API и GitHub: токен только на шлюзе, подпись запросов, журнал с цепочкой хешей"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
