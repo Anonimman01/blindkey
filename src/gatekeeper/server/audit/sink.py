@@ -1,11 +1,11 @@
-"""Файловое хранилище журнала: права 0600, fsync после каждой записи."""
+"""Файловое хранилище журнала: права 0600, fsync после каждой записи (или пачки записей)."""
 from __future__ import annotations
 
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from gatekeeper.core.errors import AuditError
 
@@ -28,7 +28,7 @@ def _try_lock(fd: int) -> None:
     if os.name == "nt":
         import msvcrt
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined,unused-ignore]
     else:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -38,7 +38,7 @@ def _unlock(fd: int) -> None:
     if os.name == "nt":
         import msvcrt
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined,unused-ignore]
     else:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -109,12 +109,22 @@ class FileSink:
             return b""
 
     def append_line(self, line: bytes) -> None:
-        if b"\n" in line:
+        self.append_lines([line])
+
+    def append_lines(self, lines: list[bytes]) -> None:
+        """Записать пачку строк одним write и одним fsync (group commit)."""
+        if not lines:
+            return
+        if any(b"\n" in line for line in lines):
             raise AuditError("line must not contain newline")
+        payload = b"\n".join(lines) + b"\n"
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _BINARY
         fd = os.open(self.path, flags, 0o600)
         try:
-            os.write(fd, line + b"\n")
+            view = memoryview(payload)
+            while view:  # os.write может записать не всё
+                n = os.write(fd, view)
+                view = view[n:]
             os.fsync(fd)
         finally:
             os.close(fd)

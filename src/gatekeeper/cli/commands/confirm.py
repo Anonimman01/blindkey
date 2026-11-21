@@ -1,7 +1,7 @@
 """gatekeeper pending / approve / reject: подтверждение опасных действий. Шлюз подхватывает сразу."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from gatekeeper.cli import output
 from gatekeeper.core.errors import GatekeeperError
@@ -25,7 +25,7 @@ def _store(layout: Layout) -> Approvals:
 
 
 def _fmt_time(ts: int) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).strftime("%H:%M:%S")
+    return datetime.fromtimestamp(ts, UTC).strftime("%H:%M:%S")
 
 
 def pending(args, layout: Layout) -> int:

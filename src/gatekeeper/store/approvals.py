@@ -14,10 +14,10 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
 
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.timeutil import unix_now

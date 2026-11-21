@@ -6,7 +6,11 @@ from gatekeeper.cli.main import main
 from gatekeeper.core.errors import AuditError
 from gatekeeper.core.events import EventType
 from gatekeeper.server.audit.anchor import (
-    Anchor, append_anchor, load_anchors, parse_anchors, serialize_anchor,
+    Anchor,
+    append_anchor,
+    load_anchors,
+    parse_anchors,
+    serialize_anchor,
 )
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink

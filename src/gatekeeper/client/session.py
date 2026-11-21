@@ -6,7 +6,6 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-from gatekeeper.core import constants
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.kdf import derive_signing_key
 from gatekeeper.core.signing import build_headers, new_nonce
@@ -26,7 +25,10 @@ class Session:
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
         if len(cn) != 1:
             raise GatekeeperError("client certificate must have exactly one CN")
-        self.client_id: str = cn[0].value
+        cn_value = cn[0].value
+        if not isinstance(cn_value, str):
+            raise GatekeeperError("client certificate CN must be text")
+        self.client_id: str = cn_value
         self.fingerprint = cert_fingerprint(cert)
         self._key = derive_signing_key(master, 0)
 

@@ -12,7 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 from gatekeeper.core.errors import AuditError
 from gatekeeper.core.events import EventType, Severity
@@ -76,7 +78,9 @@ class AuditChain:
 
         self._sink = sink
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # замок записи: один «лидер» сбрасывает пачку
+        self._pending_lock = threading.Lock()
+        self._pending: list[_Pending] = []
         self._secrets = tuple(secrets)  # известные секреты: маскируются в data
         self._next_seq = 0
         self._last_hash = GENESIS_HASH
@@ -90,6 +94,10 @@ class AuditChain:
                 self._next_seq = res.last_seq + 1
                 self._last_hash = res.last_hash
                 self._offset = sink.size()
+
+    @property
+    def next_seq(self) -> int:
+        return self._next_seq
 
     def _sync_tail(self) -> None:
         """Под замком: учесть записи других процессов (проверяя их цепочку)."""
@@ -116,21 +124,72 @@ class AuditChain:
         data: dict | None = None,
         severity: Severity | str = Severity.INFO,
     ) -> dict:
+        """Добавить запись и вернуть {"seq", "hash"} после fsync.
+
+        Group commit: запись ставится в очередь, а поток, который первым взял замок записи,
+        сбрасывает на диск всю накопившуюся пачку одним write и одним fsync. Пока идёт fsync,
+        остальные потоки копят записи, поэтому лишней задержки в простое нет, а под нагрузкой
+        на пачку приходится один fsync. Каждый вызывающий возвращается только после fsync
+        своей записи (durability не меняется).
+        """
         etype = event_type.value if isinstance(event_type, EventType) else str(event_type)
         sev = severity.value if isinstance(severity, Severity) else str(severity)
         payload = {} if data is None else data
         if not isinstance(payload, dict):
             raise AuditError("data must be a dict")
-        payload = redact_obj(payload, self._secrets)
-        with self._lock, self._sink.locked():
-            self._sync_tail()
-            line, h = serialize_record(
-                self._next_seq, self._clock(), etype, sev, payload, self._last_hash
-            )
-            self._sink.append_line(line)
-            self._sink.write_head(self._next_seq, h)
-            seq = self._next_seq
-            self._next_seq += 1
-            self._last_hash = h
-            self._offset += len(line) + 1
-        return {"seq": seq, "hash": h}
+        item = _Pending(etype, sev, redact_obj(payload, self._secrets))
+        with self._pending_lock:
+            self._pending.append(item)
+        with self._lock:
+            if not item.done:  # иначе нас уже записал другой поток в своей пачке
+                self._flush()
+        if item.error is not None:
+            raise item.error
+        assert item.result is not None
+        return item.result
+
+    def _flush(self) -> None:
+        """Под self._lock: записать все ожидающие записи одной пачкой."""
+        with self._pending_lock:
+            batch, self._pending = self._pending, []
+        if not batch:
+            return
+        try:
+            with self._sink.locked():
+                self._sync_tail()
+                seq, prev = self._next_seq, self._last_hash
+                lines: list[bytes] = []
+                written: list[tuple[_Pending, dict]] = []
+                for item in batch:
+                    try:  # сбой сериализации одной записи не должен ронять всю пачку
+                        line, h = serialize_record(
+                            seq, self._clock(), item.etype, item.sev, item.data, prev)
+                    except AuditError as exc:
+                        item.error, item.done = exc, True
+                        continue
+                    lines.append(line)
+                    written.append((item, {"seq": seq, "hash": h}))
+                    seq, prev = seq + 1, h
+                if lines:
+                    self._sink.append_lines(lines)
+                    self._sink.write_head(seq - 1, prev)
+                    self._offset += sum(len(ln) + 1 for ln in lines)
+                    self._next_seq, self._last_hash = seq, prev
+            for item, res in written:
+                item.result, item.done = res, True
+        except BaseException as exc:
+            for item in batch:
+                if not item.done:
+                    item.error, item.done = exc, True
+            if not isinstance(exc, Exception):
+                raise
+
+
+@dataclass
+class _Pending:
+    etype: str
+    sev: str
+    data: dict
+    result: dict | None = None
+    error: BaseException | None = None
+    done: bool = field(default=False)

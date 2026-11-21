@@ -60,10 +60,9 @@ def test_renew_rejects_revoked_unknown_and_duplicate_fingerprint(reg):
 
 
 def test_lock_timeout(reg):
-    with reg._locked():
-        with pytest.raises(RegistryError, match="lock timeout"):
-            with reg._locked(timeout=0.05):
-                pass
+    with reg._locked(), pytest.raises(RegistryError, match="lock timeout"):
+        with reg._locked(timeout=0.05):
+            pass
 
 
 def test_concurrent_adds_do_not_lose_updates(reg):

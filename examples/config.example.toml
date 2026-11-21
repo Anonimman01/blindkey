@@ -4,6 +4,8 @@
 [server]
 listen_host = "127.0.0.1"   # на VPS: "0.0.0.0" или адрес интерфейса
 listen_port = 8443
+# metrics_socket = "/run/gatekeeper/ops.sock"  # GET /healthz и /metrics, только локально (Unix-сокет, 0600)
+# persist_state = true      # nonce, бюджет, баны и аномалии в state.db переживают перезапуск
 
 [provider]
 name = "telegram"

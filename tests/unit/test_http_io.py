@@ -115,7 +115,7 @@ def test_target_too_long():
 
 
 def test_non_ascii_target():
-    raw = "GET /é HTTP/1.1\r\nHost: gw\r\n\r\n".encode("utf-8")
+    raw = "GET /é HTTP/1.1\r\nHost: gw\r\n\r\n".encode()
     assert denied(raw).status == 400
 
 

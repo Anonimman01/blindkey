@@ -264,10 +264,9 @@ _WRITER = (
 
 
 def test_parallel_processes_keep_chain_valid(paths):
+    import os
     import subprocess
     import sys
-
-    import os
     from pathlib import Path
 
     import gatekeeper

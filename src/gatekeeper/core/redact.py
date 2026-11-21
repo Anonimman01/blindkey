@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 MASK = "[REDACTED]"
 _MIN_SECRET_LEN = 6  # слишком короткие "секреты" маскировать нельзя: порвут весь текст
@@ -20,7 +21,7 @@ _PATTERNS = [
     re.compile(r"(?<=/bot)[^/\s?]+"),
     # PEM-блоки приватных ключей
     re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL
     ),
     # Authorization: Bearer xxx
     re.compile(r"(?i)(?<=bearer )[A-Za-z0-9._~+/=-]{8,}"),

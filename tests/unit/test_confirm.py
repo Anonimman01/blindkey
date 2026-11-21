@@ -6,17 +6,20 @@ import sys
 import threading
 
 import pytest
+from test_pipeline import TOKEN, audit_text, call, make_env, make_req
 
 from gatekeeper.cli.main import main
 from gatekeeper.core.redact import MASK
 from gatekeeper.server.audit.verify import verify_file
 from gatekeeper.server.config import ConfigError, load_config
-from gatekeeper.server.http_io import ParsedRequest
 from gatekeeper.store.approvals import (
-    MAX_PER_CLIENT, MAX_PENDING, ApprovalError, Approvals, make_preview, request_key,
+    MAX_PENDING,
+    MAX_PER_CLIENT,
+    ApprovalError,
+    Approvals,
+    make_preview,
+    request_key,
 )
-
-from test_pipeline import TOKEN, audit_text, call, make_env, make_req
 
 
 class Clock:

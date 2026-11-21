@@ -6,19 +6,34 @@ build-backend = "setuptools.build_meta"
 name = "gatekeeper"
 version = "0.2.0"
 requires-python = ">=3.11"
-license = {text = "Apache-2.0"}
+description = "mTLS-шлюз для Telegram Bot API и GitHub: токен только на шлюзе, подпись запросов, журнал с цепочкой хешей"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Anonimman01"}]
-classifiers = ["License :: OSI Approved :: Apache Software License"]
+keywords = ["telegram", "bot", "gateway", "mtls", "security", "audit"]
 dependencies = ["cryptography>=42", "h11>=0.14"]
+
+[project.urls]
+Homepage = "https://github.com/Anonimman01/blindkey"
+Security = "https://github.com/Anonimman01/blindkey/security/policy"
+Changelog = "https://github.com/Anonimman01/blindkey/blob/main/CHANGELOG.md"
 
 [project.scripts]
 gatekeeper = "gatekeeper.cli.main:main"
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "pip-audit"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+gatekeeper = ["py.typed"]
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

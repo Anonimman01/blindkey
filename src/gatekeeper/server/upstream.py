@@ -38,7 +38,7 @@ class Upstream:
         try:
             async with asyncio.timeout(self.timeout if timeout is None else timeout):
                 return await self._fetch(req)
-        except TimeoutError as exc:
+        except TimeoutError:
             raise UpstreamError("timeout") from None
         except (OSError, h11.ProtocolError) as exc:  # ssl.SSLError входит в OSError
             raise UpstreamError(type(exc).__name__) from None

@@ -1,7 +1,12 @@
 """Тесты лимитов: бан по IP, соединения, частота, суточный бюджет."""
 import pytest
 
-from gatekeeper.server.limits import ConnectionLimiter, DailyBudget, IpBanList, RateLimiter
+from gatekeeper.server.limits import (
+    ConnectionLimiter,
+    DailyBudget,
+    IpBanList,
+    RateLimiter,
+)
 
 
 class Clock:

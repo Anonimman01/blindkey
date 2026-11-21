@@ -1,11 +1,10 @@
 """Сквозной тест: настоящий mTLS-шлюз на 127.0.0.1 + клиент + fake_telegram."""
-import json
 import asyncio
+import json
 import socket
 import ssl
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest

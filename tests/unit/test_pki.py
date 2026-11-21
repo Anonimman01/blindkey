@@ -8,7 +8,11 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from gatekeeper.core.errors import PkiError
 from gatekeeper.pki import ca as pki
-from gatekeeper.pki.fingerprint import cert_fingerprint, fingerprint_from_der, fingerprint_from_pem
+from gatekeeper.pki.fingerprint import (
+    cert_fingerprint,
+    fingerprint_from_der,
+    fingerprint_from_pem,
+)
 
 
 @pytest.fixture(scope="module")

@@ -13,8 +13,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ["3.13", "3.14"]
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - {os: windows-latest, python: "3.13"}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -25,11 +27,53 @@ jobs:
           allow-prereleases: true
           cache: pip
           cache-dependency-path: requirements.lock
-      - name: Install pinned dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --require-hashes -r requirements.lock
-          python -m pip install pytest
-          python -m pip install --no-deps -e .
+          python -m pip install pytest pytest-cov
+          python -m pip install -e .
       - name: Tests
-        run: python -m pytest -q
+        run: python -m pytest -q --cov=gatekeeper --cov-report=term-missing
+
+  lock:
+    # Проверяем, что requirements.lock (с хешами) всё ещё ставится на 3.14 (как раньше).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --no-deps -e .
+          python -m pip install pytest
+          python -m pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e . ruff mypy
+      - name: mypy (должен быть зелёным)
+        run: mypy src
+      - name: ruff (пока не блокирует: остались замечания в тестах)
+        continue-on-error: true
+        run: ruff check src tests
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e . pip-audit
+      - run: pip-audit --strict

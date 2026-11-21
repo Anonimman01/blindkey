@@ -22,7 +22,7 @@ def test_rfc5869_case1():
 
 def test_rfc5869_case2_long_inputs():
     okm = hkdf_sha256(
-        ikm=bytes(range(0x00, 0x50)),
+        ikm=bytes(range(0x50)),
         salt=bytes(range(0x60, 0xB0)),
         info=bytes(range(0xB0, 0x100)),
         length=82,

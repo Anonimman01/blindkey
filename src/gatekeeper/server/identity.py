@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -47,6 +47,8 @@ class Identity:
 
 def _parse_entry(client_id: str, e: object) -> ClientRecord | None:
     try:
+        if not isinstance(e, dict):
+            return None
         fp, status, exp = e["fingerprint"], e["status"], e["expires"]
         master = bytes.fromhex(e["master_secret"])
         policy = Policy.from_strings(e["allow"])

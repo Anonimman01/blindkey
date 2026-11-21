@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -24,7 +24,7 @@ _BINARY = getattr(os, "O_BINARY", 0)
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _new_key() -> ec.EllipticCurvePrivateKey:
@@ -39,13 +39,13 @@ def _name(cn: str) -> x509.Name:
 
 def _not_after(cert: x509.Certificate) -> datetime:
     return getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after.replace(
-        tzinfo=timezone.utc
+        tzinfo=UTC
     )
 
 
 def _not_before(cert: x509.Certificate) -> datetime:
     return getattr(cert, "not_valid_before_utc", None) or cert.not_valid_before.replace(
-        tzinfo=timezone.utc
+        tzinfo=UTC
     )
 
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from gatekeeper.core.errors import GatekeeperError
@@ -17,6 +17,10 @@ class ConfigError(GatekeeperError):
 class Config:
     listen_host: str = "127.0.0.1"
     listen_port: int = 8443
+    # Unix-сокет для /healthz и /metrics (None = выключено). Только локально, права 0600.
+    metrics_socket: str | None = None
+    # Хранить nonce, суточный бюджет, баны и счётчики аномалий в SQLite (переживают рестарт).
+    persist_state: bool = True
     provider: str = "telegram"
     secret_env: str | None = "GATEKEEPER_UPSTREAM_TOKEN"
     secret_file: str | None = None
@@ -42,8 +46,9 @@ class Config:
     confirm_ttl: int = 300
 
 
-_SCHEMA = {
-    "server": {"listen_host": str, "listen_port": int},
+_SCHEMA: dict[str, dict[str, type]] = {
+    "server": {"listen_host": str, "listen_port": int, "metrics_socket": str,
+               "persist_state": bool},
     "provider": {
         "name": str, "secret_env": str, "secret_file": str,
         "upstream_host": str, "upstream_port": int, "upstream_tls": bool,
@@ -63,18 +68,28 @@ _FIELD = {("provider", "name"): "provider", ("confirm", "apis"): "confirm_apis",
 
 def _check_type(section: str, key: str, value: object, typ: type) -> object:
     if typ is list:
-        ok = isinstance(value, list) and all(isinstance(x, str) for x in value)
-        if ok:
+        if isinstance(value, list) and all(isinstance(x, str) for x in value):
             return tuple(value)
+        ok = False
     elif typ is float:
-        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        ok = False
     elif typ is int:
         ok = isinstance(value, int) and not isinstance(value, bool)
     else:
         ok = isinstance(value, typ)
     if not ok:
         raise ConfigError(f"[{section}] {key}: expected {typ.__name__}")
-    return float(value) if typ is float else value
+    return value
+
+
+def _build(flat: dict[str, object]) -> Config:
+    """Config(**flat) с проверкой имён: типы значений уже проверены в _check_type."""
+    names = {f.name for f in fields(Config)}
+    if not set(flat) <= names:
+        raise ConfigError("internal: unknown config field")
+    return Config(**flat)  # type: ignore[arg-type]
 
 
 def load_config(path: str | Path) -> Config:
@@ -98,7 +113,7 @@ def load_config(path: str | Path) -> Config:
         for key, typ in keys.items():
             if key in sec:
                 flat[_FIELD.get((section, key), key)] = _check_type(section, key, sec[key], typ)
-    cfg = Config(**flat)
+    cfg = _build(flat)
     if not 1 <= cfg.listen_port <= 65535 or not 1 <= cfg.upstream_port <= 65535:
         raise ConfigError("port out of range")
     for name in ("max_connections", "max_per_ip", "burst", "daily_budget", "max_body_bytes"):

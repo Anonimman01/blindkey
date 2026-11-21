@@ -6,16 +6,20 @@
 budget) и расхождение часов (stale_time) не считаются: это ошибки настройки, а не атака.
 decoy_triggered сюда не входит: у приманки нет клиента, её уже обрабатывает бан по IP.
 
-Состояние в памяти: после перезапуска шлюза счётчики сбрасываются.
+Если передан StateStore, окно событий переживает перезапуск шлюза.
 """
 from __future__ import annotations
 
 import threading
 from collections import defaultdict, deque
-from typing import Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from gatekeeper.core.events import EventType
 from gatekeeper.core.timeutil import unix_now
+
+if TYPE_CHECKING:
+    from gatekeeper.server.state import StateStore
 
 COUNTED_EVENTS = frozenset({
     EventType.DENY_BAD_SIGNATURE, EventType.DENY_REPLAY, EventType.DENY_POLICY,
@@ -29,12 +33,17 @@ class AnomalyMonitor:
     """
 
     def __init__(self, threshold: int = 0, window: int = 60,
-                 clock: Callable[[], int] = unix_now) -> None:
+                 clock: Callable[[], int] = unix_now, *,
+                 store: StateStore | None = None) -> None:
         if threshold < 0 or window <= 0:
             raise ValueError("threshold must be >= 0 and window > 0")
         self.threshold, self.window, self._clock = threshold, window, clock
         self._lock = threading.Lock()
+        self._store = store
         self._hits: dict[str, deque[int]] = defaultdict(deque)
+        if store and self.enabled:
+            for cid, ts in store.load_hits(clock() - window):
+                self._hits[cid].append(ts)
 
     @property
     def enabled(self) -> bool:
@@ -51,8 +60,12 @@ class AnomalyMonitor:
             q.append(now)
             while q and q[0] <= now - self.window:
                 q.popleft()
+            if self._store:
+                self._store.add_hit(client_id, now, now - self.window)
             if len(q) >= self.threshold:
                 n = len(q)
                 del self._hits[client_id]
+                if self._store:
+                    self._store.clear_hits(client_id)
                 return n
             return None

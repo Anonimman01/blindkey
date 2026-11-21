@@ -96,9 +96,11 @@ def test_audit_verify_detects_tamper(env, capsys):
 
 
 def test_audit_masks_secret_values():
+    import pathlib
+    import tempfile
+
     from gatekeeper.server.audit.chain import AuditChain
     from gatekeeper.server.audit.sink import FileSink
-    import tempfile, pathlib
     d = pathlib.Path(tempfile.mkdtemp())
     c = AuditChain(FileSink(d / "a.log"), secrets=("supersecretvalue",))
     c.append("x", {"note": "has supersecretvalue inside", "token": "t"})
@@ -108,9 +110,17 @@ def test_audit_masks_secret_values():
 
 
 def test_client_id_rules_and_cn_limit():
-    from gatekeeper.core.signing import is_valid_client_id as v
     from gatekeeper.core.errors import PkiError
+    from gatekeeper.core.signing import is_valid_client_id as v
     assert v("bot-1") and v("a.b_c") and not v(".") and not v("..") and not v("-x")
     c, k = ca.create_ca()
     with pytest.raises(PkiError):
         ca.issue_server_cert(c, k, ["a" * 70 + ".example.com"])
+
+
+def test_status_reports_ok_and_detects_broken_journal(env):
+    base, cfg, data, cakey, _ = env
+    assert main(base + ["status"]) == 0
+    log = data / "audit" / "audit.log"
+    log.write_bytes(log.read_bytes().replace(b'"type":"', b'"type":"x', 1))
+    assert main(base + ["status"]) == 2

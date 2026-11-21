@@ -2,22 +2,31 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import ssl
 
 from gatekeeper.core.events import EventType
 from gatekeeper.pki import ca as pki_ca
+from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink
-from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.config import Config
 from gatekeeper.server.honey.decoys import DecoyStore
 from gatekeeper.server.http_io import HttpError, HttpLimits, read_request
-from gatekeeper.server.http_response import neutral_response
+from gatekeeper.server.http_response import build_response, neutral_response
 from gatekeeper.server.identity import IdentityStore
-from gatekeeper.server.limits import ConnectionLimiter, DailyBudget, IpBanList, RateLimiter
+from gatekeeper.server.limits import (
+    ConnectionLimiter,
+    DailyBudget,
+    IpBanList,
+    RateLimiter,
+)
 from gatekeeper.server.nonce_cache import NonceCache
+from gatekeeper.server.observe import Metrics, new_request_id, stamp
 from gatekeeper.server.pipeline import Pipeline
 from gatekeeper.server.providers import create_provider
+from gatekeeper.server.state import StateStore
 from gatekeeper.server.tls import build_server_context, peer_cert_der
 from gatekeeper.server.upstream import Upstream
 from gatekeeper.store.approvals import Approvals
@@ -32,7 +41,9 @@ _HANDSHAKE_TIMEOUT = 10.0
 class GatekeeperApp:
     def __init__(self, *, pipeline: Pipeline, bans: IpBanList, limiter: ConnectionLimiter,
                  audit: AuditChain, http_limits: HttpLimits, ssl_ctx: ssl.SSLContext,
-                 host: str, port: int) -> None:
+                 host: str, port: int, metrics: Metrics | None = None,
+                 metrics_socket: str | None = None) -> None:
+        self.metrics, self.metrics_socket = metrics, metrics_socket
         self.pipeline, self.bans, self.limiter, self.audit = pipeline, bans, limiter, audit
         self.http_limits, self.ssl_ctx, self.host, self.port = http_limits, ssl_ctx, host, port
         self._malformed_log = RateLimiter(rate_per_sec=1.0, burst=5)  # защита журнала от флуда
@@ -78,10 +89,14 @@ class GatekeeperApp:
                 try:
                     req = await read_request(reader, self.http_limits)
                 except HttpError as exc:
+                    rid = new_request_id()
                     if self._malformed_log.allow(ip):
                         await asyncio.to_thread(self.audit.append, EventType.DENY_MALFORMED,
-                                                {"reason": exc.reason, "ip": ip})
-                    resp = neutral_response(exc.status)
+                                                {"reason": exc.reason, "ip": ip,
+                                                 "rid": rid})
+                    if self.metrics is not None:
+                        self.metrics.inc("gk_requests_total", status=str(exc.status))
+                    resp = stamp(neutral_response(exc.status), rid)
                 else:
                     resp = await self.pipeline.handle(req, ip, der)
                 writer.write(resp)
@@ -106,10 +121,51 @@ class GatekeeperApp:
                                     {"action": "run", "listen": f"{self.host}:{self.port}"})
             if on_started is not None:
                 on_started()
+            ops = await self._start_ops_socket()
             try:
                 await server.serve_forever()
             finally:
+                if ops is not None:
+                    ops.close()
+                    with contextlib.suppress(OSError):
+                        os.unlink(self.metrics_socket)  # type: ignore[arg-type]
                 await self._cancel_conn_tasks()
+
+    def _gauges(self) -> dict[str, float]:
+        return {"gk_connections": float(self.limiter.total),
+                "gk_audit_next_seq": float(self.audit.next_seq),
+                "gk_nonce_cache_entries": float(len(self.pipeline.nonces))}
+
+    async def _start_ops_socket(self):
+        """Служебный Unix-сокет: GET /healthz и GET /metrics. Не на публичном порту."""
+        if not self.metrics_socket or os.name == "nt" or self.metrics is None:
+            return None
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.metrics_socket)
+        old = os.umask(0o177)  # сокет создаётся сразу с правами 0600
+        try:
+            return await asyncio.start_unix_server(self._on_ops, self.metrics_socket)
+        finally:
+            os.umask(old)
+
+    async def _on_ops(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            line = await asyncio.wait_for(reader.readline(), 2.0)
+            parts = line.split()
+            path = parts[1].decode("ascii", "replace") if len(parts) >= 2 else ""
+            if parts[:1] == [b"GET"] and path == "/healthz":
+                body, ctype, status = b'{"ok":true}', "application/json", 200
+            elif parts[:1] == [b"GET"] and path == "/metrics" and self.metrics is not None:
+                body = self.metrics.render(self._gauges()).encode()
+                ctype, status = "text/plain; version=0.0.4", 200
+            else:
+                body, ctype, status = b'{"ok":false}', "application/json", 404
+            writer.write(build_response(status, body, ctype))
+            await writer.drain()
+        except (OSError, TimeoutError):
+            pass
+        finally:
+            writer.close()
 
     async def _cancel_conn_tasks(self) -> None:
         """При остановке отменяем незавершённые соединения и дожидаемся их закрытия."""
@@ -124,18 +180,20 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     secret = load_secret(cfg.secret_env, cfg.secret_file)
     provider = create_provider(cfg.provider, secret, cfg.upstream_host, cfg.upstream_port)
     audit = AuditChain(FileSink(layout.audit_log), secrets=provider.known_secrets())
-    bans = IpBanList()
+    store = StateStore(layout.state_db) if cfg.persist_state else None
+    metrics = Metrics()
+    bans = IpBanList(store=store)
     ca_cert = pki_ca.load_cert_pem(layout.ca_cert.read_bytes())
     registry = Registry(layout.clients_file)
     pipeline = Pipeline(
         identity=IdentityStore(registry, ca_cert),
         provider=provider,
         upstream=Upstream(provider.host, provider.port, use_tls=cfg.upstream_tls),
-        audit=audit, nonces=NonceCache(),
+        audit=audit, nonces=NonceCache(store=store), metrics=metrics,
         client_limiter=RateLimiter(cfg.rate_per_sec, cfg.burst),
-        budget=DailyBudget(cfg.daily_budget), bans=bans,
+        budget=DailyBudget(cfg.daily_budget, store=store), bans=bans,
         decoy_check=DecoyStore(layout.decoys_file).is_decoy, decoy_ban_seconds=cfg.decoy_ban_seconds,
-        anomalies=AnomalyMonitor(cfg.autofreeze_threshold, cfg.autofreeze_window),
+        anomalies=AnomalyMonitor(cfg.autofreeze_threshold, cfg.autofreeze_window, store=store),
         freeze_client=lambda cid: registry.set_status(cid, "frozen"),
         approvals=Approvals(layout.approvals_file, cfg.confirm_ttl) if cfg.confirm_apis else None,
         confirm_apis=frozenset(cfg.confirm_apis))
@@ -145,4 +203,5 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
         http_limits=HttpLimits(max_body=cfg.max_body_bytes, header_timeout=cfg.header_timeout,
                                body_timeout=cfg.body_timeout),
         ssl_ctx=build_server_context(layout.ca_cert, layout.server_cert, layout.server_key),
-        host=cfg.listen_host, port=cfg.listen_port)
+        host=cfg.listen_host, port=cfg.listen_port,
+        metrics=metrics, metrics_socket=cfg.metrics_socket)

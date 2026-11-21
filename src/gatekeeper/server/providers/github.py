@@ -11,7 +11,10 @@ import json
 import re
 
 from gatekeeper.server.providers.base import (
-    Provider, ProviderError, UpstreamRequest, UpstreamResponse,
+    Provider,
+    ProviderError,
+    UpstreamRequest,
+    UpstreamResponse,
 )
 from gatekeeper.server.providers.telegram import MAX_JSON_DEPTH, _json_too_deep
 

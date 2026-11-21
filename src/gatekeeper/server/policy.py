@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from gatekeeper.core.errors import PolicyError
 
@@ -58,7 +58,7 @@ class Policy:
         self._index = {(r.http_method, r.api_name): r for r in self._rules}
 
     @classmethod
-    def from_strings(cls, rules: object) -> "Policy":
+    def from_strings(cls, rules: object) -> Policy:
         if not isinstance(rules, (list, tuple)):
             raise PolicyError("allow must be a list")
         return cls(parse_rule(r) for r in rules)

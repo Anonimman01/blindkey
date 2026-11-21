@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from email.utils import formatdate
 from http import HTTPStatus
 
 NEUTRAL_BODY = b'{"ok":false}'
@@ -30,18 +31,24 @@ def build_response(
     lines = [f"HTTP/1.1 {status} {phrase}"]
     if content_type is not None:
         lines.append(f"Content-Type: {_check(content_type)}")
+    lines.append(f"Date: {formatdate(usegmt=True)}")
     lines.append(f"Content-Length: {len(body)}")
+    lines.append("Cache-Control: no-store")
     lines.append("Connection: close")
     for name, value in (extra_headers or {}).items():
         n = _check(name)
-        if not n or ":" in n or " " in n or n.lower() in {"content-length", "connection", "transfer-encoding"}:
+        if not n or ":" in n or " " in n or n.lower() in {
+                "content-length", "connection", "transfer-encoding", "date", "cache-control"}:
             raise ValueError("invalid header name")
         lines.append(f"{n}: {_check(value)}")
     return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + body
 
 
-def neutral_response(status: int) -> bytes:
-    """Ответ на отказ: только код (из узкого набора) и одинаковое тело."""
+def neutral_response(status: int, extra_headers: dict[str, str] | None = None) -> bytes:
+    """Ответ на отказ: только код (из узкого набора) и одинаковое тело.
+
+    extra_headers нужны только для служебных заголовков вроде Retry-After.
+    """
     if status not in _SAFE_STATUSES:
         status = 400
-    return build_response(status, NEUTRAL_BODY, "application/json")
+    return build_response(status, NEUTRAL_BODY, "application/json", extra_headers)

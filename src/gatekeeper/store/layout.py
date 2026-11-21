@@ -15,7 +15,7 @@ class Layout:
     data_dir: Path
 
     @classmethod
-    def from_args(cls, config_dir: str | None, data_dir: str | None) -> "Layout":
+    def from_args(cls, config_dir: str | None, data_dir: str | None) -> Layout:
         return cls(
             Path(config_dir or os.environ.get("GATEKEEPER_CONFIG_DIR", DEFAULT_CONFIG_DIR)),
             Path(data_dir or os.environ.get("GATEKEEPER_DATA_DIR", DEFAULT_DATA_DIR)),
@@ -41,3 +41,5 @@ class Layout:
     def decoys_file(self) -> Path: return self.data_dir / "decoys.json"
     @property
     def approvals_file(self) -> Path: return self.data_dir / "approvals.json"
+    @property
+    def state_db(self) -> Path: return self.data_dir / "state.db"

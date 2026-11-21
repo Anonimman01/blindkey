@@ -1,7 +1,11 @@
 """Тесты сборки ответа: нейтральность и защита от инъекции заголовков."""
 import pytest
 
-from gatekeeper.server.http_response import NEUTRAL_BODY, build_response, neutral_response
+from gatekeeper.server.http_response import (
+    NEUTRAL_BODY,
+    build_response,
+    neutral_response,
+)
 
 
 def test_build_response_shape():

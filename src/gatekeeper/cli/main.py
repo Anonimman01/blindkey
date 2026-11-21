@@ -6,8 +6,17 @@ import sys
 
 from gatekeeper.cli import output
 from gatekeeper.cli.commands import (
-    add_client, audit_anchor, audit_verify, client_status, confirm, decoy_create, init, list_clients,
-    renew, run,
+    add_client,
+    audit_anchor,
+    audit_verify,
+    client_status,
+    confirm,
+    decoy_create,
+    init,
+    list_clients,
+    renew,
+    run,
+    status,
 )
 from gatekeeper.store.layout import Layout
 
@@ -72,6 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--days", type=int, default=365)
     s.add_argument("--hint", default="", help="где вы её разместили (для журнала)")
     s.set_defaults(func=decoy_create.run)
+
+    s = sub.add_parser("status", help="сводка: клиенты, журнал, состояние")
+    s.set_defaults(func=status.run)
 
     s = sub.add_parser("run", help="запустить шлюз")
     s.set_defaults(func=run.run)

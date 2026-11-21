@@ -9,7 +9,8 @@ nonce -> политика -> лимиты -> upstream -> фильтр ответ
 from __future__ import annotations
 
 import asyncio
-from typing import Callable
+import time
+from collections.abc import Callable
 
 from gatekeeper.core import constants
 from gatekeeper.core.errors import SigningError
@@ -25,6 +26,7 @@ from gatekeeper.server.http_response import build_response, neutral_response
 from gatekeeper.server.identity import IdentityStore
 from gatekeeper.server.limits import DailyBudget, IpBanList, RateLimiter
 from gatekeeper.server.nonce_cache import NonceCache
+from gatekeeper.server.observe import Metrics, new_request_id, request_id, stamp
 from gatekeeper.server.providers.base import Provider, ProviderError
 from gatekeeper.server.upstream import Upstream, UpstreamError
 from gatekeeper.store.approvals import Approvals, make_preview
@@ -49,7 +51,9 @@ class Pipeline:
                  freeze_client: Callable[[str], None] | None = None,
                  approvals: Approvals | None = None,
                  confirm_apis: frozenset[str] = frozenset(),
-                 clock: Callable[[], int] = unix_now) -> None:
+                 clock: Callable[[], int] = unix_now,
+                 metrics: Metrics | None = None) -> None:
+        self.metrics = metrics
         self.identity, self.provider, self.upstream, self.audit = identity, provider, upstream, audit
         self.nonces, self.client_limiter, self.budget, self.bans = nonces, client_limiter, budget, bans
         self.decoy_check, self.decoy_ban_seconds, self.clock = decoy_check, decoy_ban_seconds, clock
@@ -57,18 +61,27 @@ class Pipeline:
         self.approvals, self.confirm_apis = approvals, frozenset(confirm_apis)
 
     async def _log(self, etype, data: dict, sev: Severity = Severity.INFO) -> None:
+        rid = request_id.get()
+        if rid is not None:
+            data = {**data, "rid": rid}  # связь ответа клиента с записью журнала
+        if self.metrics is not None:
+            self.metrics.inc("gk_events_total", type=getattr(etype, "value", etype))
         await asyncio.to_thread(self.audit.append, etype, data, sev)
 
     async def _deny(self, etype: EventType, status: int, reason: str, ip: str,
-                    client: str | None = None, sev: Severity = Severity.WARNING) -> bytes:
+                    client: str | None = None, sev: Severity = Severity.WARNING,
+                    retry_after: int | None = None) -> bytes:
         await self._log(etype, {"reason": reason, "ip": ip, "client": client}, sev)
-        if client is not None and self.anomalies is not None:
-            await self._maybe_autofreeze(client, etype, ip)
-        return neutral_response(status)
+        anomalies = self.anomalies
+        if client is not None and anomalies is not None:
+            await self._maybe_autofreeze(client, etype, ip, anomalies)
+        extra = {"Retry-After": str(retry_after)} if retry_after else None
+        return neutral_response(status, extra)
 
-    async def _maybe_autofreeze(self, client: str, etype, ip: str) -> None:
+    async def _maybe_autofreeze(self, client: str, etype, ip: str,
+                                anomalies: AnomalyMonitor) -> None:
         """Порог аномалий достигнут: замораживаем клиента (как `gatekeeper freeze`)."""
-        count = self.anomalies.record(client, etype)
+        count = anomalies.record(client, etype)
         if count is None or self.freeze_client is None:
             return
         try:
@@ -79,7 +92,7 @@ class Pipeline:
             return
         await self._log(EventType.CLIENT_FROZEN,
                         {"client": client, "auto": True, "trigger": getattr(etype, "value", str(etype)),
-                         "count": count, "window": self.anomalies.window, "ip": ip}, Severity.ALERT)
+                         "count": count, "window": anomalies.window, "ip": ip}, Severity.ALERT)
 
     async def _confirm(self, cid: str, decision, req: ParsedRequest, ip: str) -> tuple[str | None, bytes | None]:
         """Опасный метод: (id подтверждения, None) если подтверждён, иначе (None, ответ-отказ).
@@ -87,11 +100,14 @@ class Pipeline:
         Подтверждение расходуется здесь же. Если следом сработает дневной бюджет, подтверждение
         пропадёт, и оператору придётся подтвердить заново.
         """
+        approvals = self.approvals
+        if approvals is None:  # вызывается только при включённых подтверждениях
+            raise RuntimeError("approvals are not configured")
         api = decision.api_name
         text = req.body.decode("utf-8", "replace")
         preview = make_preview(redact_text(text, self.provider.known_secrets()))
         res = await asyncio.to_thread(
-            self.approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip)
+            approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip)
         if res.state == "approved":
             return res.id, None
         reason = {"new": f"confirm_new:{res.id}", "pending": f"confirm_pending:{res.id}",
@@ -100,14 +116,26 @@ class Pipeline:
         return None, await self._deny(EventType.DENY_CONFIRM_REQUIRED, 403, reason, ip, cid, sev)
 
     async def handle(self, req: ParsedRequest, ip: str, peer_der: bytes | None) -> bytes:
+        rid = new_request_id()
+        token = request_id.set(rid)
+        started = time.monotonic()
         try:
-            return await self._handle(req, ip, peer_der)
-        except Exception as exc:  # fail closed; только тип ошибки, без текста
             try:
-                await self._log("internal_error", {"error": type(exc).__name__, "ip": ip}, Severity.ALERT)
-            except Exception:
-                pass
-            return neutral_response(500)
+                resp = await self._handle(req, ip, peer_der)
+            except Exception as exc:  # fail closed; только тип ошибки, без текста
+                try:
+                    await self._log("internal_error", {"error": type(exc).__name__, "ip": ip},
+                                    Severity.ALERT)
+                except Exception:
+                    pass
+                resp = neutral_response(500)
+            if self.metrics is not None:
+                self.metrics.inc("gk_requests_total", status=resp[9:12].decode("ascii", "replace"))
+                self.metrics.inc("gk_request_seconds_sum", time.monotonic() - started)
+                self.metrics.inc("gk_request_seconds_count")
+            return stamp(resp, rid)
+        finally:
+            request_id.reset(token)
 
     async def _handle(self, req: ParsedRequest, ip: str, peer_der: bytes | None) -> bytes:
         ident = self.identity.identify(peer_der)
@@ -145,14 +173,16 @@ class Pipeline:
         if decision is None:
             return await self._deny(EventType.DENY_POLICY, 403, "not_allowed", ip, cid)
         if not self.client_limiter.allow(cid):
-            return await self._deny(EventType.DENY_RATE_LIMIT, 429, "rate", ip, cid)
+            return await self._deny(EventType.DENY_RATE_LIMIT, 429, "rate", ip, cid,
+                                    retry_after=self.client_limiter.retry_after(cid))
         confirmed = None
         if self.approvals is not None and decision.api_name in self.confirm_apis:
             confirmed, refusal = await self._confirm(cid, decision, req, ip)
             if refusal is not None:
                 return refusal
         if not self.budget.try_spend(cid):
-            return await self._deny(EventType.DENY_BUDGET, 429, "daily_budget", ip, cid)
+            return await self._deny(EventType.DENY_BUDGET, 429, "daily_budget", ip, cid,
+                                    retry_after=self.budget.seconds_until_reset())
 
         api = decision.api_name
         try:

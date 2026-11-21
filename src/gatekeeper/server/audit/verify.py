@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Sequence
 
 from gatekeeper.core.errors import AuditError
 from gatekeeper.server.audit.anchor import Anchor, check_anchors

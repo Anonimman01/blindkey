@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.signing import is_valid_client_id
@@ -111,7 +111,7 @@ class Registry:
             if client_id not in clients:
                 raise RegistryError("unknown client")
             current = clients[client_id].get("status")
-            if status not in _TRANSITIONS.get(current, ()):
+            if current is None or status not in _TRANSITIONS.get(current, ()):
                 raise RegistryError(f"cannot change status {current} -> {status}")
             clients[client_id]["status"] = status
             self._save(clients)

@@ -10,7 +10,10 @@ import json
 import re
 
 from gatekeeper.server.providers.base import (
-    Provider, ProviderError, UpstreamRequest, UpstreamResponse,
+    Provider,
+    ProviderError,
+    UpstreamRequest,
+    UpstreamResponse,
 )
 
 _TOKEN_RE = re.compile(r"^[0-9]{3,12}:[A-Za-z0-9_-]{8,128}$")
@@ -22,7 +25,7 @@ _FULL_TOKEN_RE = re.compile(r"\d+:[A-Za-z0-9_-]{30,}")
 # Глубина вложенности JSON-ответа: ответы Bot API неглубокие. Лимит явный, чтобы блокировка
 # не зависела от recursion limit и версии интерпретатора (в 3.14 json.loads не падает на 100000).
 MAX_JSON_DEPTH = 64
-_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.S)
+_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.DOTALL)
 _BODY_TYPES = frozenset({"application/json", "application/x-www-form-urlencoded", "multipart/form-data"})
 DOWNLOAD_METHOD = "downloadFile"
 # Long polling: потолок параметра timeout у getUpdates и запас сверх него на сеть.

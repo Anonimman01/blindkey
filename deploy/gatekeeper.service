@@ -30,6 +30,10 @@ Environment=GATEKEEPER_DATA_DIR=/var/lib/gatekeeper
 ExecStart=/opt/gatekeeper/.venv/bin/gatekeeper run
 Restart=on-failure
 RestartSec=3
+StartLimitIntervalSec=300
+StartLimitBurst=5
+RuntimeDirectory=gatekeeper
+RuntimeDirectoryMode=0700
 
 # Ограничения. Порт 8443 непривилегированный, поэтому capabilities не нужны.
 NoNewPrivileges=true
@@ -46,10 +50,14 @@ ProtectClock=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectProc=invisible
+ProcSubset=pid
 RestrictRealtime=true
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@mount @obsolete @debug @cpu-emulation
 UMask=0077
 # Пишем только журнал и данные; конфигурацию шлюз только читает.
 ReadWritePaths=/var/lib/gatekeeper

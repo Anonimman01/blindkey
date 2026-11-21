@@ -2,13 +2,12 @@
 import json
 
 import pytest
+from test_pipeline import audit_text, call, make_env, make_req
 
 from gatekeeper.core.events import EventType
 from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.config import ConfigError, load_config
 from gatekeeper.store.registry import Registry
-
-from test_pipeline import audit_text, call, make_env, make_req
 
 
 class Clock:
