@@ -1,2 +1,2 @@
-cryptography>=42
+cryptography>=50.0.2
 h11>=0.14

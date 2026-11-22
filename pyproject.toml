@@ -21,7 +21,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 keywords = ["telegram", "bot", "gateway", "mtls", "security", "audit"]
-dependencies = ["cryptography>=42", "h11>=0.14"]
+dependencies = ["cryptography>=50.0.2", "h11>=0.14"]
 
 [project.urls]
 Homepage = "https://github.com/Anonimman01/blindkey"
