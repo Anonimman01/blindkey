@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-22
+
 ### Added
 - Group commit журнала: один fsync на пачку одновременных записей.
 - `state.db` (SQLite, WAL): nonce, суточный бюджет, баны и счётчики аномалий переживают перезапуск.
@@ -18,5 +20,8 @@
 - `license` в pyproject: SPDX-строка; убран устаревший classifier.
 - systemd-юнит: `MemoryDenyWriteExecute`, `ProtectProc`, `ProcSubset`, `StartLimitBurst`, `AF_UNIX`.
 - mypy: 0 ошибок в `src`.
+- h11>=0.16 (в более ранних версиях неточный разбор chunked-тел, CVE-2025-43859).
+- Dependabot: `increase-if-necessary`, чтобы не поднимать нижние границы без нужды.
+- CI: `pip-audit` проверяет `requirements.lock`.
 
 ## [0.2.0]

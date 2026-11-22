@@ -4,6 +4,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Не поднимать нижние границы в pyproject.toml без необходимости:
+    # точные версии задаёт requirements.lock.
+    versioning-strategy: increase-if-necessary
   - package-ecosystem: github-actions
     directory: /
     schedule:
