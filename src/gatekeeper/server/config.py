@@ -9,6 +9,7 @@ from pathlib import Path
 
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.server.policy import is_valid_api_name
+from gatekeeper.server.providers import KNOWN_PROVIDERS
 
 
 class ConfigError(GatekeeperError):
@@ -33,6 +34,21 @@ def _is_loopback_host(host: str | None) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+@dataclass(frozen=True)
+class ProviderCfg:
+    """Один провайдер upstream: у каждого свой секрет и (для тестов) свой адрес."""
+    name: str
+    secret_env: str | None = None
+    secret_file: str | None = None
+    upstream_host: str | None = None
+    upstream_port: int = 443
+    upstream_tls: bool = True
+
+
+_PROVIDER_KEYS = {"secret_env": str, "secret_file": str, "upstream_host": str,
+                  "upstream_port": int, "upstream_tls": bool}
 
 
 @dataclass(frozen=True)
@@ -66,6 +82,16 @@ class Config:
     # `gatekeeper approve`. Пусто = выключено. ttl: сколько секунд живёт заявка/подтверждение.
     confirm_apis: tuple[str, ...] = ()
     confirm_ttl: int = 300
+    # Несколько провайдеров на одном шлюзе: таблицы [providers.<имя>]. Пусто = один провайдер
+    # из [provider] (прежний формат).
+    providers: tuple[ProviderCfg, ...] = ()
+
+    def effective_providers(self) -> tuple[ProviderCfg, ...]:
+        """Список провайдеров шлюза; первый используется для клиентов без поля provider."""
+        if self.providers:
+            return self.providers
+        return (ProviderCfg(self.provider, self.secret_env, self.secret_file,
+                            self.upstream_host, self.upstream_port, self.upstream_tls),)
 
 
 _SCHEMA: dict[str, dict[str, type]] = {
@@ -106,6 +132,31 @@ def _check_type(section: str, key: str, value: object, typ: type) -> object:
     return value
 
 
+def _parse_providers(raw: object, *, has_single: bool) -> tuple[ProviderCfg, ...]:
+    """[providers.telegram], [providers.github]: порядок в файле = приоритет по умолчанию."""
+    if raw is None:
+        return ()
+    if has_single:
+        raise ConfigError("use either [provider] or [providers.<name>], not both")
+    if not isinstance(raw, dict) or not raw:
+        raise ConfigError("[providers] must contain at least one table")
+    out: list[ProviderCfg] = []
+    for name, sec in raw.items():
+        if name not in KNOWN_PROVIDERS:
+            raise ConfigError(f"[providers.{name}]: unknown provider (known: {list(KNOWN_PROVIDERS)})")
+        if not isinstance(sec, dict):
+            raise ConfigError(f"[providers.{name}] must be a table")
+        extra = set(sec) - set(_PROVIDER_KEYS)
+        if extra:
+            raise ConfigError(f"[providers.{name}] unknown key(s): {sorted(extra)}")
+        vals = {k: _check_type(f"providers.{name}", k, sec[k], t)
+                for k, t in _PROVIDER_KEYS.items() if k in sec}
+        if "secret_env" not in vals and "secret_file" not in vals:
+            vals["secret_env"] = f"GATEKEEPER_{name.upper()}_TOKEN"
+        out.append(ProviderCfg(name, **vals))  # type: ignore[arg-type]
+    return tuple(out)
+
+
 def _build(flat: dict[str, object]) -> Config:
     """Config(**flat) с проверкой имён: типы значений уже проверены в _check_type."""
     names = {f.name for f in fields(Config)}
@@ -121,6 +172,7 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError(f"config not found: {path}") from exc
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError("config is not valid TOML") from exc
+    providers = _parse_providers(doc.pop("providers", None), has_single=bool(doc.get("provider")))
     unknown = set(doc) - set(_SCHEMA)
     if unknown:
         raise ConfigError(f"unknown section(s): {sorted(unknown)}")
@@ -135,6 +187,8 @@ def load_config(path: str | Path) -> Config:
         for key, typ in keys.items():
             if key in sec:
                 flat[_FIELD.get((section, key), key)] = _check_type(section, key, sec[key], typ)
+    if providers:
+        flat["providers"] = providers
     cfg = _build(flat)
     if not 1 <= cfg.listen_port <= 65535 or not 1 <= cfg.upstream_port <= 65535:
         raise ConfigError("port out of range")
@@ -155,9 +209,12 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError("decoy_ban_seconds must be >= 0")
     if cfg.autofreeze_threshold < 0 or cfg.autofreeze_window <= 0:
         raise ConfigError("autofreeze_threshold must be >= 0 and autofreeze_window > 0")
-    if not cfg.upstream_tls and not _is_loopback_host(cfg.upstream_host):
-        # без TLS токен ушёл бы по сети открытым текстом; для тестов хватает loopback
-        raise ConfigError("upstream_tls=false is allowed only with a loopback upstream_host")
+    for pc in cfg.effective_providers():
+        if not 1 <= pc.upstream_port <= 65535:
+            raise ConfigError("port out of range")
+        if not pc.upstream_tls and not _is_loopback_host(pc.upstream_host):
+            # без TLS токен ушёл бы по сети открытым текстом; для тестов хватает loopback
+            raise ConfigError("upstream_tls=false is allowed only with a loopback upstream_host")
     if not all(is_valid_api_name(a) for a in cfg.confirm_apis):
         raise ConfigError("[confirm] apis: invalid api name")
     if not 1 <= cfg.confirm_ttl <= 86400:

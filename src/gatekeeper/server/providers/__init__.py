@@ -5,6 +5,8 @@ from gatekeeper.server.providers.base import Provider, ProviderError
 from gatekeeper.server.providers.github import GitHubProvider
 from gatekeeper.server.providers.telegram import TelegramProvider
 
+KNOWN_PROVIDERS = ("telegram", "github")
+
 
 def create_provider(name: str, secret: str, host: str | None = None, port: int = 443) -> Provider:
     if name == "telegram":

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from gatekeeper.core import constants
 from gatekeeper.core.errors import SigningError
@@ -45,7 +45,11 @@ def _num(value: object) -> int | None:
 
 
 class Pipeline:
-    def __init__(self, *, identity: IdentityStore, provider: Provider, upstream: Upstream,
+    def __init__(self, *, identity: IdentityStore, provider: Provider | None = None,
+                 upstream: Upstream | None = None,
+                 providers: Mapping[str, Provider] | None = None,
+                 upstreams: Mapping[str, Upstream] | None = None,
+                 default_provider: str | None = None,
                  audit: AuditChain, nonces: NonceCache, client_limiter: RateLimiter,
                  budget: DailyBudget, bans: IpBanList,
                  decoy_check: Callable[[str], bool] | None = None,
@@ -57,7 +61,22 @@ class Pipeline:
                  clock: Callable[[], int] = unix_now,
                  metrics: Metrics | None = None) -> None:
         self.metrics = metrics
-        self.identity, self.provider, self.upstream, self.audit = identity, provider, upstream, audit
+        # Один провайдер (provider/upstream) или несколько (providers/upstreams): клиент привязан
+        # к своему провайдеру полем provider в реестре; без поля берётся default_provider.
+        if providers is None:
+            if provider is None or upstream is None:
+                raise ValueError("provider and upstream (or providers and upstreams) are required")
+            providers, upstreams = {provider.name: provider}, {provider.name: upstream}
+        if not providers or upstreams is None or set(upstreams) != set(providers):
+            raise ValueError("providers and upstreams must have the same non-empty set of names")
+        self.providers, self.upstreams = dict(providers), dict(upstreams)
+        self.default_provider = default_provider or next(iter(self.providers))
+        if self.default_provider not in self.providers:
+            raise ValueError("default_provider is not among providers")
+        self.provider = self.providers[self.default_provider]  # по умолчанию (совместимость)
+        self.upstream = self.upstreams[self.default_provider]
+        self._all_secrets = tuple(s for pv in self.providers.values() for s in pv.known_secrets())
+        self.identity, self.audit = identity, audit
         self.nonces, self.client_limiter, self.budget, self.bans = nonces, client_limiter, budget, bans
         self.decoy_check, self.decoy_ban_seconds, self.clock = decoy_check, decoy_ban_seconds, clock
         self.anomalies, self.freeze_client = anomalies, freeze_client
@@ -124,7 +143,7 @@ class Pipeline:
         api = decision.api_name
         # Предпросмотр короткий: маскируем только начало тела, а не весь мегабайт.
         text = req.body[:_PREVIEW_SOURCE_BYTES].decode("utf-8", "replace")
-        preview = make_preview(redact_text(text, self.provider.known_secrets()))
+        preview = make_preview(redact_text(text, self._all_secrets))
         res = await asyncio.to_thread(
             approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip)
         if res.state == "approved":
@@ -202,30 +221,35 @@ class Pipeline:
                                     retry_after=self.budget.seconds_until_reset())
 
         api = decision.api_name
+        pname = rec.provider or self.default_provider
+        provider, upstream = self.providers.get(pname), self.upstreams.get(pname)
+        if provider is None or upstream is None:  # провайдер клиента не настроен на этом шлюзе
+            return await self._deny(EventType.DENY_POLICY, 403, "provider_unavailable", ip, cid)
         try:
-            up_req = self.provider.build_request(
+            up_req = provider.build_request(
                 api, decision.rule.http_method, req.body, req.headers.get("content-type"))
         except ProviderError as exc:
             return await self._deny(EventType.DENY_MALFORMED, 400, str(exc), ip, cid)
         try:
-            timeout = self.provider.upstream_timeout(api, req.body)
+            timeout = provider.upstream_timeout(api, req.body)
             if timeout is None:
-                up_resp = await self.upstream.fetch(up_req)
+                up_resp = await upstream.fetch(up_req)
             else:
-                up_resp = await self.upstream.fetch(up_req, timeout=timeout)
+                up_resp = await upstream.fetch(up_req, timeout=timeout)
         except UpstreamError as exc:
             await self._log("upstream_error", {"reason": str(exc), "client": cid, "api": api, "ip": ip},
                             Severity.WARNING)
             return neutral_response(502)
         # фильтр разбирает тело до нескольких МБ: не в потоке event loop
-        safe = await asyncio.to_thread(self.provider.filter_response, up_resp)
+        safe = await asyncio.to_thread(provider.filter_response, up_resp)
         if safe is None:
             await self._log(EventType.RESPONSE_SECRET_BLOCKED,
                             {"client": cid, "api": api, "ip": ip}, Severity.ALERT)
             return neutral_response(502)
         status = safe.status if (200 <= safe.status < 300 or safe.status in _PASSTHROUGH) else 502
         await self._log(EventType.REQUEST_OK,
-                        {"client": cid, "api": api, "ip": ip, "status": status, "bytes": len(safe.body),
+                        {"client": cid, "api": api, "provider": pname, "ip": ip, "status": status,
+                         "bytes": len(safe.body),
                          **({"confirmed": confirmed} if confirmed else {})})
         try:
             return build_response(status, safe.body, safe.content_type)

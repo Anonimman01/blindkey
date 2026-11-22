@@ -219,14 +219,19 @@ class GatekeeperApp:
 
 
 def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
-    secret = load_secret(cfg.secret_env, cfg.secret_file)
     # Существующие файлы данных: права 0600, владелец, не симлинк (создание даёт 0600 само).
     for private in (layout.audit_log, layout.audit_log.parent / "chain.head",
                     layout.approvals_file, layout.decoys_file):
         harden_private_file(private)
     harden_sqlite_files(layout.state_db)
-    provider = create_provider(cfg.provider, secret, cfg.upstream_host, cfg.upstream_port)
-    audit = AuditChain(FileSink(layout.audit_log), secrets=provider.known_secrets())
+    providers, upstreams = {}, {}
+    for pc in cfg.effective_providers():
+        secret = load_secret(pc.secret_env, pc.secret_file)
+        providers[pc.name] = create_provider(pc.name, secret, pc.upstream_host, pc.upstream_port)
+        upstreams[pc.name] = Upstream(providers[pc.name].host, providers[pc.name].port,
+                                      use_tls=pc.upstream_tls)
+    all_secrets = tuple(s for pv in providers.values() for s in pv.known_secrets())
+    audit = AuditChain(FileSink(layout.audit_log), secrets=all_secrets)
     store = StateStore(layout.state_db) if cfg.persist_state else None
     metrics = Metrics()
     bans = IpBanList(store=store)
@@ -235,8 +240,7 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     registry.check_permissions()  # в файле лежат master_secret: группа/остальные не допускаются
     pipeline = Pipeline(
         identity=IdentityStore(registry, ca_cert),
-        provider=provider,
-        upstream=Upstream(provider.host, provider.port, use_tls=cfg.upstream_tls),
+        providers=providers, upstreams=upstreams,
         audit=audit, nonces=NonceCache(store=store), metrics=metrics,
         client_limiter=RateLimiter(cfg.rate_per_sec, cfg.burst),
         budget=DailyBudget(cfg.daily_budget, store=store), bans=bans,

@@ -4,9 +4,9 @@
 клиенты (боты, скрипты, агенты) получают отзываемые сертификаты с белым списком методов. Шлюз
 проверяет подпись каждого запроса, ведёт журнал с цепочкой хешей и ловит использование приманок.
 
-Репозиторий называется blindkey, пакет и команда `gatekeeper`. Версия 0.3.4, лицензия Apache-2.0.
+Репозиторий называется blindkey, пакет и команда `gatekeeper`. Версия 0.3.5, лицензия Apache-2.0.
 Независимого аудита нет, см. [SECURITY.md](SECURITY.md) и [docs/threat-model.md](docs/threat-model.md).
-Один экземпляр шлюза обслуживает одного провайдера (`[provider] name`).
+Один экземпляр шлюза может обслуживать несколько провайдеров (`[providers.<имя>]`, см. ниже); каждый клиент привязан к одному из них.
 
 ## Установка
 
@@ -105,6 +105,24 @@ getUpdates на бота, выдавайте правило одному кли�
 
 Для systemd: `EnvironmentFile=` с файлом 0600, содержащим `GATEKEEPER_UPSTREAM_TOKEN=...`,
 `User=gatekeeper`, `ExecStart=/путь/к/.venv/bin/gatekeeper run`, `Restart=on-failure`.
+
+## Несколько провайдеров на одном шлюзе
+
+В `config.toml` вместо `[provider]`:
+
+    [providers.telegram]
+    secret_env = "GK_TG_TOKEN"
+    [providers.github]
+    secret_file = "/etc/gatekeeper/github.token"
+
+Клиент привязывается к провайдеру при выпуске (токен другого провайдера он не увидит и не вызовет):
+
+    gatekeeper add-client --id tgbot --provider telegram --allow POST:sendMessage ...
+    gatekeeper add-client --id ci --provider github --allow GET:getUser ...
+
+Клиент без поля `provider` (выпущенный раньше) работает с первым провайдером из конфига. Нужны оба
+провайдера одному приложению: выпустите ему два клиента (два сертификата). Если провайдер клиента
+не настроен на шлюзе, запрос получает отказ `provider_unavailable`. Секреты всех провайдеров маскируются в журнале и предпросмотре подтверждений; в записи `request_ok` есть поле `provider`.
 
 ## GitHub вместо Telegram
 

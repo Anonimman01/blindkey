@@ -15,6 +15,7 @@ from gatekeeper.pki.fingerprint import cert_fingerprint
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink
 from gatekeeper.server.policy import parse_rule
+from gatekeeper.server.providers import KNOWN_PROVIDERS
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry, RegistryError
 
@@ -35,6 +36,10 @@ def run(args, layout: Layout) -> int:
     bad = [r for r in args.allow if not _valid_rule(r)]
     if bad:
         output.error(f"invalid --allow rule(s): {bad} (expected GET|POST:apiName, e.g. POST:sendMessage)")
+        return 1
+    provider = getattr(args, "provider", None)
+    if provider is not None and provider not in KNOWN_PROVIDERS:
+        output.error(f"unknown provider: {provider} (known: {', '.join(KNOWN_PROVIDERS)})")
         return 1
     out = Path(args.out)
     if out.exists() and any(out.iterdir()):
@@ -62,6 +67,8 @@ def run(args, layout: Layout) -> int:
         "expires": now + args.days * 86400,
         "allow": list(args.allow),
     }
+    if provider is not None:
+        entry["provider"] = provider  # без поля клиент работает с первым провайдером шлюза
     try:
         reg.add(args.id, entry)
     except GatekeeperError as exc:
@@ -76,7 +83,8 @@ def run(args, layout: Layout) -> int:
 
     AuditChain(FileSink(layout.audit_log), secrets=(master,)).append(
         EventType.CLIENT_ADDED,
-        {"client": args.id, "fingerprint": fp, "allow": list(args.allow), "days": args.days},
+        {"client": args.id, "fingerprint": fp, "allow": list(args.allow), "days": args.days,
+         **({"provider": provider} if provider else {})},
     )
     output.info(f"client {args.id} added, fingerprint {fp}")
     output.info(f"bundle written to {out} (client.key and master.secret are secret)")

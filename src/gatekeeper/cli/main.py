@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", required=True, help="каталог для пакета клиента")
     s.add_argument("--days", type=int, default=90)
     s.add_argument("--allow", action="append", default=[], help="METHOD:path, например POST:sendMessage")
+    s.add_argument("--provider", choices=["telegram", "github"], default=None,
+                   help="провайдер клиента (если на шлюзе их несколько); по умолчанию первый в конфиге")
     s.set_defaults(func=add_client.run)
 
     for name, fn, text in (("freeze", client_status.freeze, "временно заблокировать клиента"),

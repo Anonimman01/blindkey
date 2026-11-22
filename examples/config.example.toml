@@ -18,6 +18,13 @@ secret_env = "GATEKEEPER_UPSTREAM_TOKEN"
 # upstream_port = 9999
 # upstream_tls = false   # разрешено только вместе с upstream_host на loopback (127.0.0.1, ::1, localhost)
 
+# Несколько провайдеров на одном шлюзе: вместо [provider] (нельзя вместе):
+# [providers.telegram]
+# secret_env = "GATEKEEPER_TELEGRAM_TOKEN"    # по умолчанию GATEKEEPER_<ИМЯ>_TOKEN
+# [providers.github]
+# secret_file = "/etc/gatekeeper/github.token"
+# Первый провайдер в файле = по умолчанию для клиентов без поля provider.
+
 [limits]
 max_connections = 100       # всего одновременных соединений
 max_per_ip = 10             # с одного IP

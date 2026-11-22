@@ -24,6 +24,7 @@ from gatekeeper.server.policy import Policy
 from gatekeeper.store.registry import STATUSES, Registry
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_PROVIDER_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class ClientRecord:
     status: str
     expires: int
     policy: Policy
+    provider: str | None = None  # имя провайдера клиента; None = первый в конфиге
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,11 @@ def _parse_entry(client_id: str, e: object) -> ClientRecord | None:
                 or len(master) != constants.MASTER_SECRET_LEN or status not in STATUSES
                 or isinstance(exp, bool) or not isinstance(exp, int)):
             return None
-        return ClientRecord(client_id, fp, master, status, exp, policy)
+        provider = e.get("provider")
+        if provider is not None and (not isinstance(provider, str)
+                                     or not _PROVIDER_NAME.fullmatch(provider)):
+            return None
+        return ClientRecord(client_id, fp, master, status, exp, policy, provider)
     except (KeyError, TypeError, ValueError, PolicyError):
         return None  # битая запись = клиент недоступен (fail closed)
 

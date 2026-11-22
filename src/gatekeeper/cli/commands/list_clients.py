@@ -21,5 +21,7 @@ def run(args, layout: Layout) -> int:
     for cid in sorted(clients):
         c = clients[cid]
         exp = datetime.fromtimestamp(c.get("expires", 0), UTC).strftime("%Y-%m-%d")
-        output.info(f"{cid}\t{c.get('status','?')}\t{c.get('fingerprint','?')}\texpires {exp}")
+        prov = c.get("provider")
+        output.info(f"{cid}\t{c.get('status','?')}\t{c.get('fingerprint','?')}\texpires {exp}"
+                    + (f"\tprovider {prov}" if isinstance(prov, str) else ""))
     return 0
