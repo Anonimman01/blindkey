@@ -116,6 +116,8 @@ class RateLimiter:
         clock: Callable[[], float] | None = None,
         max_keys: int = DEFAULT_MAX_KEYS,
     ) -> None:
+        if not math.isfinite(rate_per_sec) or not math.isfinite(burst):
+            raise ValueError("rate and burst must be finite")
         if rate_per_sec <= 0 or burst <= 0 or max_keys <= 0:
             raise ValueError("rate, burst and max_keys must be positive")
         import time

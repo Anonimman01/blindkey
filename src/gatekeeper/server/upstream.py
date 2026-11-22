@@ -63,6 +63,11 @@ class Upstream:
                     conn.receive_data(await reader.read(65536))
                 elif isinstance(ev, h11.Response):
                     status = ev.status_code
+                    # Запрошен identity. Любая другая кодировка (gzip/br/...) скрыла бы секрет
+                    # от фильтра ответа: отказываем, не пытаясь распаковывать.
+                    enc = dict(ev.headers).get(b"content-encoding", b"identity")
+                    if enc.strip().lower() not in (b"", b"identity"):
+                        raise UpstreamError("unsupported_content_encoding")
                     ctype = _safe_content_type(dict(ev.headers).get(b"content-type"))
                 elif isinstance(ev, h11.Data):
                     size += len(ev.data)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -12,6 +13,15 @@ from gatekeeper.server.policy import is_valid_api_name
 
 class ConfigError(GatekeeperError):
     """Ошибка конфигурации."""
+
+
+# Верхние границы: опечатка в конфиге не должна выключать защиту или разрешать OOM.
+_MAX_BODY_BYTES = 16 * 1024 * 1024
+_MAX_CONNECTIONS = 100_000
+_MAX_BURST = 1_000_000
+_MAX_DAILY_BUDGET = 100_000_000
+_MAX_TIMEOUT = 3600.0
+_MAX_RATE = 100_000.0
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -128,13 +138,21 @@ def load_config(path: str | Path) -> Config:
     cfg = _build(flat)
     if not 1 <= cfg.listen_port <= 65535 or not 1 <= cfg.upstream_port <= 65535:
         raise ConfigError("port out of range")
-    for name in ("max_connections", "max_per_ip", "burst", "daily_budget", "max_body_bytes"):
-        if getattr(cfg, name) <= 0:
-            raise ConfigError(f"{name} must be positive")
-    if cfg.header_timeout <= 0 or cfg.body_timeout <= 0:
-        raise ConfigError("timeouts must be positive")
-    if cfg.rate_per_sec <= 0 or cfg.decoy_ban_seconds < 0:
-        raise ConfigError("invalid rate_per_sec or decoy_ban_seconds")
+    for name in ("rate_per_sec", "header_timeout", "body_timeout"):
+        if not math.isfinite(getattr(cfg, name)):
+            raise ConfigError(f"{name} must be a finite number")
+    upper = {"max_connections": _MAX_CONNECTIONS, "max_per_ip": _MAX_CONNECTIONS,
+             "burst": _MAX_BURST, "daily_budget": _MAX_DAILY_BUDGET,
+             "max_body_bytes": _MAX_BODY_BYTES}
+    for name, high in upper.items():
+        if not 1 <= getattr(cfg, name) <= high:
+            raise ConfigError(f"{name} must be between 1 and {high}")
+    if not 0 < cfg.header_timeout <= _MAX_TIMEOUT or not 0 < cfg.body_timeout <= _MAX_TIMEOUT:
+        raise ConfigError(f"timeouts must be in (0, {_MAX_TIMEOUT:g}] seconds")
+    if not 0 < cfg.rate_per_sec <= _MAX_RATE:
+        raise ConfigError(f"rate_per_sec must be in (0, {_MAX_RATE:g}]")
+    if cfg.decoy_ban_seconds < 0:
+        raise ConfigError("decoy_ban_seconds must be >= 0")
     if cfg.autofreeze_threshold < 0 or cfg.autofreeze_window <= 0:
         raise ConfigError("autofreeze_threshold must be >= 0 and autofreeze_window > 0")
     if not cfg.upstream_tls and not _is_loopback_host(cfg.upstream_host):

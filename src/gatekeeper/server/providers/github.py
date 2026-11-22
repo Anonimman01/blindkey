@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import json
 import re
 
 from gatekeeper.server.providers.base import (
@@ -16,7 +15,7 @@ from gatekeeper.server.providers.base import (
     UpstreamRequest,
     UpstreamResponse,
 )
-from gatekeeper.server.providers.telegram import MAX_JSON_DEPTH, _json_too_deep
+from gatekeeper.server.providers.jsonscan import response_must_be_blocked
 
 # Классический (ghp_, gho_, ghu_, ghs_, ghr_) и fine-grained (github_pat_) токены.
 _TOKEN_RE = re.compile(r"^(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})$")
@@ -64,33 +63,6 @@ class GitHubProvider(Provider):
 
     def filter_response(self, resp: UpstreamResponse) -> UpstreamResponse | None:
         """None = ответ блокируется (fail closed). Логика та же, что у Telegram."""
-        if self._token.encode("ascii") in resp.body:
+        if response_must_be_blocked(resp, (self._token,), self._leaks):
             return None
-        ct = (resp.content_type or "").lower()
-        if not ct.startswith(("application/json", "text/")):
-            return resp
-        text = resp.body.decode("utf-8", "replace")
-        if self._leaks(text):
-            return None
-        if ct.startswith("application/json"):
-            if _json_too_deep(text, MAX_JSON_DEPTH):
-                return None
-            try:
-                data = json.loads(text)
-            except ValueError:
-                return resp
-            except RecursionError:
-                return None
-            stack = [data]
-            while stack:  # токен мог прийти с JSON-экранированием (\u0067hp_...)
-                node = stack.pop()
-                if isinstance(node, str):
-                    if self._leaks(node):
-                        return None
-                elif isinstance(node, dict):
-                    for k, v in node.items():
-                        stack.append(k)
-                        stack.append(v)
-                elif isinstance(node, list):
-                    stack.extend(node)
         return resp

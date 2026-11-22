@@ -15,6 +15,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from gatekeeper.store.fsperm import harden_private_file, harden_sqlite_files
+
 _BINARY = getattr(os, "O_BINARY", 0)
 
 _SCHEMA = """
@@ -36,11 +38,13 @@ class StateStore:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Создаём файл сами, чтобы права были 0600 (sqlite иначе берёт umask).
         os.close(os.open(self.path, os.O_RDWR | os.O_CREAT | _BINARY, 0o600))
+        harden_private_file(self.path)  # существующий файл с 0644 приводится к 0600
         self._lock = threading.Lock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        harden_sqlite_files(self.path)  # -wal/-shm создаются sqlite только что
 
     def close(self) -> None:
         with self._lock:

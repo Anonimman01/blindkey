@@ -15,36 +15,25 @@ from gatekeeper.server.providers.base import (
     UpstreamRequest,
     UpstreamResponse,
 )
+from gatekeeper.server.providers.jsonscan import (  # noqa: F401  (реэкспорт для github/тестов)
+    MAX_JSON_DEPTH,
+    _json_too_deep,
+    response_must_be_blocked,
+)
 
-_TOKEN_RE = re.compile(r"^[0-9]{3,12}:[A-Za-z0-9_-]{8,128}$")
+# Secret part у BotFather — 35 символов; нижняя граница 30 исключает токены, чья secret part
+# совпала бы с обычным текстом чужого сообщения.
+_TOKEN_RE = re.compile(r"^[0-9]{3,12}:[A-Za-z0-9_-]{30,128}$")
 _FILE_PATH_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_./-]{0,199}$")
 # Ответ блокируется только по точным значениям секрета (known_secrets). Общий шаблон токена
 # здесь не используется: чужое сообщение с токеноподобной строкой не должно блокировать
 # getUpdates навсегда (offset не сдвигается), а шаблон без якоря давал квадратичное время.
 # Шаблоны нужны только для маскирования журнала (core/redact.py).
-# Глубина вложенности JSON-ответа: ответы Bot API неглубокие. Лимит явный, чтобы блокировка
-# не зависела от recursion limit и версии интерпретатора (в 3.14 json.loads не падает на 100000).
-MAX_JSON_DEPTH = 64
-_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.DOTALL)
 _BODY_TYPES = frozenset({"application/json", "application/x-www-form-urlencoded", "multipart/form-data"})
 DOWNLOAD_METHOD = "downloadFile"
 # Long polling: потолок параметра timeout у getUpdates и запас сверх него на сеть.
 MAX_POLL_SECONDS = 50
 POLL_MARGIN = 10.0
-
-
-def _json_too_deep(text: str, limit: int = MAX_JSON_DEPTH) -> bool:
-    """True, если скобки вне строк вложены глубже limit. Строки пропускаются целиком."""
-    depth = 0
-    for m in _JSON_TOKEN_RE.finditer(text):
-        ch = m.group()
-        if ch in "[{":
-            depth += 1
-            if depth > limit:
-                return True
-        elif ch in "]}":
-            depth -= 1
-    return False
 
 
 class TelegramProvider(Provider):
@@ -59,6 +48,7 @@ class TelegramProvider(Provider):
         self.port = port
 
     def known_secrets(self) -> tuple[str, ...]:
+        """Для журнала и предпросмотра (маскирование): токен и его secret part."""
         return (self._token, self._token_secret_part)
 
     def _headers(self, body: bytes, content_type: str | None) -> tuple[tuple[str, str], ...]:
@@ -105,39 +95,12 @@ class TelegramProvider(Provider):
         return poll + POLL_MARGIN
 
     def _leaks(self, text: str) -> bool:
-        return any(secret in text for secret in self.known_secrets())
+        # Только полный токен: secret part входит в него как подстрока, а отдельная проверка
+        # давала бы ложные срабатывания на чужих сообщениях (и вечный блок getUpdates).
+        return self._token in text
 
     def filter_response(self, resp: UpstreamResponse) -> UpstreamResponse | None:
-        """None = ответ блокируется. Блок только по точным значениям секрета."""
-        for secret in self.known_secrets():
-            if secret.encode("ascii") in resp.body:
-                return None
-        ct = (resp.content_type or "").lower()
-        if not ct.startswith(("application/json", "text/")):
-            return resp
-        text = resp.body.decode("utf-8", "replace")
-        if self._leaks(text):
+        """None = ответ блокируется (fail closed): секрет, дубли ключей JSON, глубина."""
+        if response_must_be_blocked(resp, (self._token,), self._leaks):
             return None
-        if ct.startswith("application/json"):
-            # Токен мог прийти с JSON-экранированием (\u0041...): проверяем разобранные строки.
-            if _json_too_deep(text):
-                return None  # слишком глубокая вложенность: блокируем (fail closed)
-            try:
-                data = json.loads(text)
-            except ValueError:
-                return resp  # не JSON: сырой текст уже проверен
-            except RecursionError:
-                return None  # не удалось разобрать: блокируем (fail closed)
-            stack = [data]
-            while stack:
-                node = stack.pop()
-                if isinstance(node, str):
-                    if self._leaks(node):
-                        return None
-                elif isinstance(node, dict):
-                    for k, v in node.items():
-                        stack.append(k)
-                        stack.append(v)
-                elif isinstance(node, list):
-                    stack.extend(node)
         return resp

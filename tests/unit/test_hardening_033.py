@@ -40,11 +40,13 @@ def test_github_tokenlike_text_not_blocked_but_exact_token_is():
     assert p.filter_response(bad) is None
 
 
-def test_exact_secret_parts_still_blocked():
+def test_exact_token_blocked_but_secret_part_alone_is_not():
+    # N-01: secret part входит в токен как подстрока; отдельная проверка давала лишь ложные блоки.
     p = TelegramProvider(TG_TOKEN)
     secret_part = TG_TOKEN.split(":", 1)[1]
-    for text in (TG_TOKEN, secret_part):
-        assert p.filter_response(UpstreamResponse(200, "text/plain", text.encode())) is None
+    assert p.filter_response(UpstreamResponse(200, "text/plain", TG_TOKEN.encode())) is None
+    ok = UpstreamResponse(200, "text/plain", secret_part.encode())
+    assert p.filter_response(ok) is ok
 
 
 def test_pipeline_passes_tokenlike_response(tmp_path):

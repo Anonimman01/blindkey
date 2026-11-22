@@ -23,6 +23,7 @@ from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.timeutil import unix_now
 from gatekeeper.server.audit.sink import _try_lock, _unlock
 from gatekeeper.store.atomic import atomic_write_private
+from gatekeeper.store.fsperm import FilePermissionError, harden_private_file
 
 _BINARY = getattr(os, "O_BINARY", 0)
 PENDING, APPROVED = "pending", "approved"
@@ -42,6 +43,36 @@ def request_key(client_id: str, http_method: str, api: str, body: bytes) -> str:
     body_hash = hashlib.sha256(body).hexdigest()
     raw = "\n".join((client_id, http_method, api, body_hash)).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+_HEX64 = frozenset("0123456789abcdef")
+
+
+def _is_hex64(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and set(value) <= _HEX64
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_entry(key: object, v: object) -> None:
+    """Запись должна быть целой и согласованной с ключом (клиент/метод/API/хеш тела)."""
+    if not _is_hex64(key) or not isinstance(v, dict):
+        raise ValueError("bad entry")
+    if v.get("status") not in (PENDING, APPROVED):
+        raise ValueError("bad status")
+    for f in ("client", "method", "api", "preview", "ip"):
+        if not isinstance(v.get(f), str):
+            raise ValueError(f"bad {f}")
+    if not _is_hex64(v.get("body_sha256")):
+        raise ValueError("bad body_sha256")
+    for f in ("body_len", "created", "expires"):
+        if not _is_int(v.get(f)):
+            raise ValueError(f"bad {f}")
+    raw = "\n".join((v["client"], v["method"], v["api"], v["body_sha256"])).encode("utf-8")
+    if hashlib.sha256(raw).hexdigest() != key:
+        raise ValueError("key does not match entry")
 
 
 def make_preview(text: str, limit: int = PREVIEW_LEN) -> str:
@@ -66,6 +97,10 @@ class Approvals:
     # ---- файл ----
     def _read(self) -> dict[str, dict]:
         try:
+            harden_private_file(self.path)  # владелец, не симлинк, режим 0600
+        except FilePermissionError as exc:
+            raise ApprovalError(f"approvals.json: {exc}") from exc
+        try:
             raw = self.path.read_text("utf-8")
         except FileNotFoundError:
             return {}
@@ -73,9 +108,11 @@ class Approvals:
             doc = json.loads(raw)
             items = doc["items"]
             if doc.get("version") != 1 or not isinstance(items, dict):
-                raise ValueError
-        except (ValueError, KeyError, TypeError) as exc:
-            raise ApprovalError("approvals.json is malformed") from exc
+                raise ValueError("bad structure")
+            for key, v in items.items():
+                _validate_entry(key, v)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ApprovalError("approvals.json is malformed (fix or delete the file)") from exc
         return items
 
     def _save(self, items: dict[str, dict]) -> None:
@@ -107,7 +144,7 @@ class Approvals:
 
     def _purge(self, items: dict[str, dict]) -> bool:
         now = self._clock()
-        dead = [k for k, v in items.items() if not isinstance(v.get("expires"), int) or v["expires"] <= now]
+        dead = [k for k, v in items.items() if v["expires"] <= now]
         for k in dead:
             del items[k]
         return bool(dead)

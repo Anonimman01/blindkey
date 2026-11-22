@@ -62,6 +62,11 @@ class Pipeline:
         self.decoy_check, self.decoy_ban_seconds, self.clock = decoy_check, decoy_ban_seconds, clock
         self.anomalies, self.freeze_client = anomalies, freeze_client
         self.approvals, self.confirm_apis = approvals, frozenset(confirm_apis)
+        # Защита журнала от флуда отказов (аудит GK-03/M4): записи WARNING-отказов ограничены
+        # на ключ (клиент или IP) и глобально; ALERT-события пишутся всегда. Счётчики аномалий и
+        # автозаморозка от этого не зависят: считается каждый отказ, пропускается только запись.
+        self._deny_log_key = RateLimiter(rate_per_sec=2.0, burst=20)
+        self._deny_log_all = RateLimiter(rate_per_sec=50.0, burst=200, max_keys=1)
 
     async def _log(self, etype, data: dict, sev: Severity = Severity.INFO) -> None:
         rid = request_id.get()
@@ -74,7 +79,11 @@ class Pipeline:
     async def _deny(self, etype: EventType, status: int, reason: str, ip: str,
                     client: str | None = None, sev: Severity = Severity.WARNING,
                     retry_after: int | None = None) -> bytes:
-        await self._log(etype, {"reason": reason, "ip": ip, "client": client}, sev)
+        if sev is Severity.ALERT or (self._deny_log_key.allow(client or ip)
+                                     and self._deny_log_all.allow("*")):
+            await self._log(etype, {"reason": reason, "ip": ip, "client": client}, sev)
+        elif self.metrics is not None:
+            self.metrics.inc("gk_events_suppressed_total", type=getattr(etype, "value", etype))
         anomalies = self.anomalies
         if client is not None and anomalies is not None:
             await self._maybe_autofreeze(client, etype, ip, anomalies)

@@ -119,6 +119,8 @@ class FileSink:
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _BINARY
         fd = os.open(self.path, flags, 0o600)
         try:
+            if hasattr(os, "fchmod"):  # режим 0600 в open() действует только при создании файла
+                os.fchmod(fd, 0o600)
             view = memoryview(payload)
             while view:  # os.write может записать не всё
                 n = os.write(fd, view)

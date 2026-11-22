@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import ssl
 import stat
 
@@ -31,12 +32,14 @@ from gatekeeper.server.state import StateStore
 from gatekeeper.server.tls import build_server_context, peer_cert_der
 from gatekeeper.server.upstream import Upstream
 from gatekeeper.store.approvals import Approvals
+from gatekeeper.store.fsperm import harden_private_file, harden_sqlite_files
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry
 from gatekeeper.store.secrets import load_secret
 
 _CONN_DEADLINE = 120.0  # потолок на всё соединение
 _HANDSHAKE_TIMEOUT = 10.0
+_OPS_LINE_LIMIT = 4096  # длина строки запроса на служебном сокете
 
 
 def _unlink_if_socket(path: str) -> bool:
@@ -125,23 +128,45 @@ class GatekeeperApp:
                 await writer.wait_closed()
 
     async def serve(self, on_started=None) -> None:
-        """on_started вызывается только после того, как порт реально занят."""
+        """on_started вызывается только после того, как порт реально занят.
+
+        SIGTERM (systemctl stop) завершает работу штатно: закрывается служебный сокет,
+        отменяются соединения. Без обработчика процесс умирал бы, не выполнив `finally`.
+        """
         server = await asyncio.start_server(
             self._on_conn, self.host, self.port)  # TLS поднимаем сами, в _handshake
-        async with server:
-            await asyncio.to_thread(self.audit.append, EventType.SERVER_STARTED,
-                                    {"action": "run", "listen": f"{self.host}:{self.port}"})
-            if on_started is not None:
-                on_started()
-            ops = await self._start_ops_socket()
-            try:
-                await server.serve_forever()
-            finally:
-                if ops is not None:
-                    ops.close()
-                    with contextlib.suppress(OSError):
-                        _unlink_if_socket(self.metrics_socket)  # type: ignore[arg-type]
-                await self._cancel_conn_tasks()
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        sigterm_installed = False
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(signal.SIGTERM, stop.set)
+            sigterm_installed = True
+        ops = None
+        try:
+            async with server:
+                # Сокет — до записи «server_started»: при ошибке журнал не должен врать о запуске.
+                ops = await self._start_ops_socket()
+                await asyncio.to_thread(self.audit.append, EventType.SERVER_STARTED,
+                                        {"action": "run", "listen": f"{self.host}:{self.port}"})
+                if on_started is not None:
+                    on_started()
+                forever = asyncio.ensure_future(server.serve_forever())
+                waiter = asyncio.ensure_future(stop.wait())
+                try:
+                    await asyncio.wait({forever, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    forever.cancel()
+                    waiter.cancel()
+                    await asyncio.gather(forever, waiter, return_exceptions=True)
+        finally:
+            if sigterm_installed:
+                with contextlib.suppress(Exception):
+                    loop.remove_signal_handler(signal.SIGTERM)
+            if ops is not None:
+                ops.close()
+                with contextlib.suppress(OSError):
+                    _unlink_if_socket(self.metrics_socket)  # type: ignore[arg-type]
+            await self._cancel_conn_tasks()
 
     def _gauges(self) -> dict[str, float]:
         return {"gk_connections": float(self.limiter.total),
@@ -156,7 +181,8 @@ class GatekeeperApp:
             raise ConfigError(f"metrics_socket path exists and is not a socket: {self.metrics_socket}")
         old = os.umask(0o177)  # сокет создаётся сразу с правами 0600
         try:
-            return await asyncio.start_unix_server(self._on_ops, self.metrics_socket)  # type: ignore[attr-defined,unused-ignore]
+            return await asyncio.start_unix_server(  # type: ignore[attr-defined,unused-ignore]
+                self._on_ops, self.metrics_socket, limit=_OPS_LINE_LIMIT)
         finally:
             os.umask(old)
 
@@ -174,6 +200,10 @@ class GatekeeperApp:
                 body, ctype, status = b'{"ok":false}', "application/json", 404
             writer.write(build_response(status, body, ctype))
             await writer.drain()
+        except (ValueError, asyncio.LimitOverrunError):  # строка длиннее лимита
+            with contextlib.suppress(OSError):
+                writer.write(build_response(400, b'{"ok":false}', "application/json"))
+                await writer.drain()
         except (OSError, TimeoutError):
             pass
         finally:
@@ -190,6 +220,11 @@ class GatekeeperApp:
 
 def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     secret = load_secret(cfg.secret_env, cfg.secret_file)
+    # Существующие файлы данных: права 0600, владелец, не симлинк (создание даёт 0600 само).
+    for private in (layout.audit_log, layout.audit_log.parent / "chain.head",
+                    layout.approvals_file, layout.decoys_file):
+        harden_private_file(private)
+    harden_sqlite_files(layout.state_db)
     provider = create_provider(cfg.provider, secret, cfg.upstream_host, cfg.upstream_port)
     audit = AuditChain(FileSink(layout.audit_log), secrets=provider.known_secrets())
     store = StateStore(layout.state_db) if cfg.persist_state else None
