@@ -114,6 +114,7 @@ def attempt(gw, ctx):
 
 def tls_ctx(gw, cert=None, key=None, maxv=None):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # даже тестовый клиент не говорит на TLS < 1.2
     ctx.load_verify_locations(cafile=str(gw.bundle / "ca.pem"))
     if cert:
         ctx.load_cert_chain(str(cert), str(key))
