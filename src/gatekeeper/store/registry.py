@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -17,6 +18,7 @@ from pathlib import Path
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.signing import is_valid_client_id
 from gatekeeper.server.audit.sink import _try_lock, _unlock
+from gatekeeper.store.atomic import atomic_write_private
 
 _BINARY = getattr(os, "O_BINARY", 0)
 STATUSES = frozenset({"active", "frozen", "revoked"})
@@ -46,17 +48,27 @@ class Registry:
             raise RegistryError("clients.json is malformed") from exc
         return clients
 
+    def check_permissions(self) -> None:
+        """Файл хранит master_secret открытым текстом: он должен быть доступен только владельцу.
+
+        Нарушение (бэкап, cp без -p, umask 022) = RegistryError. На Windows не проверяется.
+        """
+        if os.name == "nt":
+            return
+        try:
+            st = os.stat(self.path)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(st.st_mode):
+            raise RegistryError("clients.json is not a regular file")
+        if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise RegistryError("clients.json must not be accessible to group/others (chmod 600)")
+        if st.st_uid != os.geteuid():  # type: ignore[attr-defined,unused-ignore]
+            raise RegistryError("clients.json must be owned by the user running gatekeeper")
+
     def _save(self, clients: dict[str, dict]) -> None:
         data = json.dumps({"version": 1, "clients": clients}, indent=2, sort_keys=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY, 0o600)
-        try:
-            os.write(fd, data.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, self.path)
+        atomic_write_private(self.path, data.encode("utf-8"))
 
     @contextmanager
     def _locked(self, timeout: float = 10.0) -> Iterator[None]:

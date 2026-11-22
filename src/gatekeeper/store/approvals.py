@@ -22,6 +22,7 @@ from pathlib import Path
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.timeutil import unix_now
 from gatekeeper.server.audit.sink import _try_lock, _unlock
+from gatekeeper.store.atomic import atomic_write_private
 
 _BINARY = getattr(os, "O_BINARY", 0)
 PENDING, APPROVED = "pending", "approved"
@@ -79,15 +80,7 @@ class Approvals:
 
     def _save(self, items: dict[str, dict]) -> None:
         data = json.dumps({"version": 1, "items": items}, indent=2, sort_keys=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY, 0o600)
-        try:
-            os.write(fd, data.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, self.path)
+        atomic_write_private(self.path, data.encode("utf-8"))
 
     @contextmanager
     def _locked(self, timeout: float = 10.0) -> Iterator[None]:

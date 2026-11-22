@@ -6,7 +6,7 @@ from pathlib import Path
 
 from gatekeeper.cli import output
 from gatekeeper.core import constants
-from gatekeeper.core.errors import GatekeeperError
+from gatekeeper.core.errors import GatekeeperError, PolicyError
 from gatekeeper.core.events import EventType
 from gatekeeper.core.signing import is_valid_client_id
 from gatekeeper.core.timeutil import unix_now
@@ -14,13 +14,18 @@ from gatekeeper.pki import ca
 from gatekeeper.pki.fingerprint import cert_fingerprint
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink
+from gatekeeper.server.policy import parse_rule
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry, RegistryError
 
 
 def _valid_rule(rule: str) -> bool:
-    m, sep, path = rule.partition(":")
-    return bool(sep) and m.isupper() and 3 <= len(m) <= 10 and 0 < len(path) <= 256 and path.isprintable() and " " not in path
+    """Единый источник истины: то же правило, которое потом разберёт шлюз (policy.parse_rule)."""
+    try:
+        parse_rule(rule)
+    except PolicyError:
+        return False
+    return True
 
 
 def run(args, layout: Layout) -> int:
@@ -29,7 +34,7 @@ def run(args, layout: Layout) -> int:
         return 1
     bad = [r for r in args.allow if not _valid_rule(r)]
     if bad:
-        output.error(f"invalid --allow rule(s): {bad} (expected METHOD:path, e.g. POST:sendMessage)")
+        output.error(f"invalid --allow rule(s): {bad} (expected GET|POST:apiName, e.g. POST:sendMessage)")
         return 1
     out = Path(args.out)
     if out.exists() and any(out.iterdir()):

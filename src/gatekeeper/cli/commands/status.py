@@ -7,19 +7,26 @@ from gatekeeper.cli import output
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.server.audit.sink import FileSink
 from gatekeeper.server.audit.verify import verify_file
+from gatekeeper.server.identity import _parse_entry
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry
 
 
 def run(args, layout: Layout) -> int:
+    registry = Registry(layout.clients_file)
     try:
-        clients = Registry(layout.clients_file).load()
+        registry.check_permissions()
+        clients = registry.load()
     except GatekeeperError as exc:
         output.error(str(exc))
         return 1
     by_status = Counter(str(c.get("status", "?")) for c in clients.values())
     summary = ", ".join(f"{n} {st}" for st, n in sorted(by_status.items())) or "none"
     output.info(f"clients: {len(clients)} ({summary})")
+    # Запись, которую шлюз не сможет разобрать, делает клиента «неизвестным» (403): показываем её.
+    invalid = sorted(cid for cid, entry in clients.items() if _parse_entry(cid, entry) is None)
+    if invalid:
+        output.error(f"invalid client entries (the gateway will reject these clients): {', '.join(invalid)}")
 
     sink = FileSink(layout.audit_log)
     res = verify_file(sink.path, sink.head_path)

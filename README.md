@@ -1,15 +1,28 @@
 # gatekeeper
 
-Лёгкий API-шлюз для Telegram Bot API. Настоящий токен хранится только на шлюзе, боты
-получают отзываемые сертификаты с белым списком методов. Шлюз проверяет подпись каждого
-запроса, ведёт журнал с цепочкой хешей и ловит использование приманок.
+Лёгкий mTLS-шлюз для Telegram Bot API и GitHub REST API. Настоящий токен хранится только на шлюзе,
+клиенты (боты, скрипты, агенты) получают отзываемые сертификаты с белым списком методов. Шлюз
+проверяет подпись каждого запроса, ведёт журнал с цепочкой хешей и ловит использование приманок.
+
+Репозиторий называется blindkey, пакет и команда `gatekeeper`. Версия 0.3.2, лицензия Apache-2.0.
+Независимого аудита нет, см. [SECURITY.md](SECURITY.md) и [docs/threat-model.md](docs/threat-model.md).
+Один экземпляр шлюза обслуживает одного провайдера (`[provider] name`).
 
 ## Установка
 
-    python -m venv .venv
+Linux и macOS:
+
+    python -m venv .venv && source .venv/bin/activate
     pip install --require-hashes -r requirements.lock
-    pip install -e .
+    pip install -e ".[dev]"
     python -m pytest
+
+Windows (PowerShell) годится для разработки:
+
+    python -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    pip install -e ".[dev]"
+    python -m pytest -q; python -m ruff check src tests; python -m mypy
 
 ## Запуск на сервере (Linux)
 
@@ -31,7 +44,12 @@
     export GATEKEEPER_UPSTREAM_TOKEN='123456:ABC...'    # или secret_file в config.toml (0400)
     gatekeeper run                                      # настройки: examples/config.example.toml
 
-Long polling: добавьте клиенту `--allow POST:getUpdates` (Telegram допускает одного потребителя
+Правила `--allow` проверяются тем же разбором, что и на шлюзе: метод только `GET` или `POST`, имя API
+`[A-Za-z][A-Za-z0-9_]{0,63}`. `clients.json` хранит `master_secret` открытым текстом, поэтому шлюз
+не запустится, если файл доступен группе или остальным (нужно `chmod 600`) или принадлежит
+другому пользователю; то же показывает `gatekeeper status`.
+
+Long polling (Telegram): добавьте клиенту `--allow POST:getUpdates` (Telegram допускает одного потребителя
 getUpdates на бота, выдавайте правило одному клиенту) и вызывайте `BotApi.get_updates(offset, timeout=30)`.
 Шлюз держит запрос к Telegram `timeout` секунд (не больше 50) плюс 10 с запаса; каждый вызов тратит
 дневной бюджет и лимит частоты клиента. Очереди на стороне шлюза: v2.
@@ -88,6 +106,23 @@ getUpdates на бота, выдавайте правило одному кли�
 Для systemd: `EnvironmentFile=` с файлом 0600, содержащим `GATEKEEPER_UPSTREAM_TOKEN=...`,
 `User=gatekeeper`, `ExecStart=/путь/к/.venv/bin/gatekeeper run`, `Restart=on-failure`.
 
+## GitHub вместо Telegram
+
+В `config.toml`:
+
+    [provider]
+    name = "github"
+    # токен: GATEKEEPER_UPSTREAM_TOKEN или secret_file (классический ghp_... или fine-grained github_pat_...)
+
+Доступны методы `getUser`, `listRepos`, `listNotifications`, `getRateLimit` (только `GET`, без тела):
+
+    gatekeeper add-client --id ci --ca-key /safe/ca.key --out ./ci-bundle --allow GET:getUser --allow GET:listRepos
+
+Клиент: `BotApi("./ci-bundle", "gw.example.com", 8443).call("getUser", http_method="GET")`.
+Новый метод GitHub добавляется одной строкой в `_ROUTES` (`src/gatekeeper/server/providers/github.py`).
+Токен, найденный в ответе GitHub, блокируется так же, как у Telegram. Если вам хватает fine-grained
+токена GitHub с минимальными правами, шлюз нужен прежде всего для отзыва клиентов, подписи и журнала.
+
 ## Клиент
 
     from gatekeeper.client.botapi import BotApi
@@ -128,6 +163,26 @@ getUpdates на бота, выдавайте правило одному кли�
 Причины отказов (подпись, повтор, политика, лимиты, приманка) есть только в журнале; клиент
 получает нейтральный ответ (403/429) без причины.
 
+### Журнал с оборванной последней строкой
+
+Если запись оборвалась на середине (`kill -9`, нет места на диске, потеря питания), `audit.log`
+заканчивается без `\n`. Шлюз считает такой журнал повреждённым: `gatekeeper run` не стартует
+(`audit log failed verification: log ends with an incomplete line`), а работающий шлюз отвечает 500.
+Автоматического восстановления пока нет (`audit-repair` в планах). Ручная процедура:
+
+1. Остановите шлюз и сделайте копию: `cp audit.log audit.log.bak`.
+2. Посмотрите хвост (`tail -c 300 audit.log`) и убедитесь, что последняя строка действительно обрезана.
+3. Отрежьте всё после последнего `\n`:
+
+       python3 -c "p='audit.log'; d=open(p,'rb').read(); i=d.rfind(b'\n')+1; assert i; open(p,'r+b').truncate(i)"
+
+4. `gatekeeper audit-verify` должен пройти без ошибок (`chain.head` не опережает журнал: журнал пишется
+   первым). Затем запустите шлюз.
+
+Усечённая запись была не дописана и клиенту подтверждена не была. В самом журнале следа правки не
+останется: зафиксируйте инцидент отдельно и создайте свежий якорь (`audit-anchor`). Если в строке
+нет ни одного `\n`, не усекайте файл целиком, а восстановите его из копии или бэкапа.
+
 ## Что клиенту не отдаётся
 
 Токен бота, пути upstream, причины отказов. Ответ upstream с токеном блокируется (502) и
@@ -148,4 +203,18 @@ getUpdates на бота, выдавайте правило одному кли�
 - Без внешних якорей удаление хвоста журнала вместе с `chain.head` не обнаруживается; якоря
   создаются вручную или по cron (`audit-anchor`), автоматической отправки нет.
 - Подтверждения не защищают от оператора, который одобряет не глядя, и от компрометации самого шлюза.
-- v2: ротация ключей, другие провайдеры, очереди getUpdates.
+- Реализованы провайдеры Telegram и GitHub (один на экземпляр шлюза). v2: ротация ключей, несколько
+  провайдеров в одном экземпляре, очереди getUpdates, больше методов GitHub.
+
+## Известные проблемы
+
+Результаты внутреннего аудита 0.3.1 (22.11.2026). Критических и высоких уязвимостей не найдено.
+Исправлено в 0.3.2: проверка `--allow`, fsync каталога при записи реестра, проверка прав `clients.json`.
+Открыто:
+
+- Журнал с оборванной последней строкой требует ручной правки (см. «Журнал»).
+- Записи SQLite выполняются синхронно в event loop; под нагрузкой не измерялось.
+- Метрики латентности `gk_request_seconds_sum/count` отдаются без гистограммы.
+- `gatekeeper init` не идемпотентен: при ошибке посередине каталог нужно чистить вручную.
+- Повреждённая запись в `approvals.json` ломает команду `pending`, а в `list-clients` весь список.
+- Фаззинг HTTP-парсера, TLS-клиента и JSON-фильтра, независимый пентест: не проводились.

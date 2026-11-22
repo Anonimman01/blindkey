@@ -183,6 +183,7 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     bans = IpBanList(store=store)
     ca_cert = pki_ca.load_cert_pem(layout.ca_cert.read_bytes())
     registry = Registry(layout.clients_file)
+    registry.check_permissions()  # в файле лежат master_secret: группа/остальные не допускаются
     pipeline = Pipeline(
         identity=IdentityStore(registry, ca_cert),
         provider=provider,

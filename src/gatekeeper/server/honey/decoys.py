@@ -13,8 +13,8 @@ import re
 from pathlib import Path
 
 from gatekeeper.core.errors import GatekeeperError
+from gatekeeper.store.atomic import atomic_write_private
 
-_BINARY = getattr(os, "O_BINARY", 0)
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -73,13 +73,5 @@ class DecoyStore:
             raise DecoyError(f"decoy already exists: {name}")
         decoys[name] = {"fingerprint": fingerprint, "created": created, "hint": hint}
         data = json.dumps({"version": 1, "decoys": decoys}, indent=2, sort_keys=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY, 0o600)
-        try:
-            os.write(fd, data.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, self.path)
+        atomic_write_private(self.path, data.encode("utf-8"))
         self._reload()
