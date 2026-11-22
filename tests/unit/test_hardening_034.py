@@ -195,9 +195,19 @@ def _write_items(path, items):
 
 
 @pytest.mark.parametrize("bad", ["str", None, 5, {}, {"status": "approved"}])
-def test_malformed_entry_is_approval_error(tmp_path, bad):
+def test_malformed_entry_is_ignored_and_removed(tmp_path, bad):
+    """Повреждённая запись больше не ломает pending: она пропускается и вычищается (B-10)."""
     path = tmp_path / "approvals.json"
     _write_items(path, {"a" * 64: bad})
+    store = Approvals(path)
+    assert store.list_items() == []
+    assert store.last_dropped == 1
+    assert json.loads(path.read_text()) == {"version": 1, "items": {}}
+
+
+def test_structurally_broken_file_is_still_fail_closed(tmp_path):
+    path = tmp_path / "approvals.json"
+    path.write_text("{not json", "utf-8")
     with pytest.raises(ApprovalError):
         Approvals(path).list_items()
 
@@ -209,8 +219,10 @@ def test_forged_entry_with_mismatched_key_rejected(tmp_path):
              "body_len": 2, "preview": "", "ip": "1.2.3.4", "status": "approved",
              "created": 1, "expires": 2**40}
     _write_items(path, {key: entry})
-    with pytest.raises(ApprovalError):
-        Approvals(path).request("c1", "POST", "sendMessage", b"{}", "", "1.2.3.4")
+    # Подделанная запись отбрасывается и файл чистится: заявка создаётся заново.
+    store = Approvals(path)
+    assert store.request("c1", "POST", "sendMessage", b"{}", "", "1.2.3.4").state == "new"
+    assert [v["client"] for _rid, v in store.list_items()] == ["c1"]
 
 
 def test_valid_roundtrip_still_works(tmp_path):

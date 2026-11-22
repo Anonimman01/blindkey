@@ -1,4 +1,5 @@
 """Демо: клиент ходит к шлюзу, настоящего токена у него нет."""
+import contextlib
 import json
 import os
 import sys
@@ -18,10 +19,8 @@ t = Transport(Session(bundle), host, port)
 r = t.request("GET", "/getUser")
 show("GET /getUser (в белом списке)", r)
 if r.status == 200:
-    try:
+    with contextlib.suppress(ValueError):
         print("   login:", json.loads(r.body).get("login"))
-    except ValueError:
-        pass
 
 # 2. ещё один разрешённый метод
 show("GET /getRateLimit (в белом списке)", t.request("GET", "/getRateLimit"))

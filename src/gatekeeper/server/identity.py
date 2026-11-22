@@ -51,8 +51,6 @@ def _parse_entry(client_id: str, e: object) -> ClientRecord | None:
     if not isinstance(e, dict):
         return None
     try:
-        if not isinstance(e, dict):
-            return None
         fp, status, exp = e["fingerprint"], e["status"], e["expires"]
         master = bytes.fromhex(e["master_secret"])
         policy = Policy.from_strings(e["allow"])

@@ -20,7 +20,8 @@ HEADER_NONCE = "X-GK-Nonce"
 HEADER_SIG = "X-GK-Sig"
 
 # Заголовок ответа: идентификатор запроса для сверки с журналом (в журнале — поле rid).
-HEADER_REQUEST_ID = "X-GK-Request-Id"
+# Именно это имя пишется в ответ; константа — единственный источник истины для observe.stamp.
+HEADER_REQUEST_ID = "X-Request-Id"
 
 # Допустимое расхождение часов клиента и шлюза, секунд.
 MAX_CLOCK_SKEW_SECONDS = 30

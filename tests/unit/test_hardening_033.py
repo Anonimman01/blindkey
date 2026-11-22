@@ -95,11 +95,20 @@ def test_confirm_preview_of_huge_body_is_fast(tmp_path):
     env = make_env(tmp_path)
     env.p.approvals = Approvals(tmp_path / "approvals.json", 300)
     env.p.confirm_apis = frozenset({"sendMessage"})
-    body = b"-----BEGIN PRIVATE KEY-----" * 30_000
+    body = b'{"chat_id":1,"text":"' + b"x" * 700_000 + b'"}'
     started = time.monotonic()
     status, _ = call(env, make_req(env.fp, body=body))
     assert status == 403  # ждёт подтверждения
     assert time.monotonic() - started < 3.0
+
+
+def test_confirm_rejects_non_json_body(tmp_path):
+    """Для [confirm] тело обязано быть строгим JSON: иначе дубли ключей не увидеть (C-04)."""
+    env = make_env(tmp_path)
+    env.p.approvals = Approvals(tmp_path / "approvals.json", 300)
+    env.p.confirm_apis = frozenset({"sendMessage"})
+    body = b"-----BEGIN PRIVATE KEY-----" * 100
+    assert call(env, make_req(env.fp, body=body))[0] == 400 and not env.up.calls
 
 
 # ---- L2: [confirm] без учёта регистра ----

@@ -8,6 +8,7 @@ from gatekeeper.cli import output
 from gatekeeper.cli.commands import (
     add_client,
     audit_anchor,
+    audit_repair,
     audit_verify,
     client_status,
     confirm,
@@ -15,11 +16,15 @@ from gatekeeper.cli.commands import (
     init,
     list_clients,
     renew,
+    renew_server,
     run,
     status,
 )
 from gatekeeper.server.providers import KNOWN_PROVIDERS
 from gatekeeper.store.layout import Layout
+
+_PASS_FILE_HELP = ("файл с паролем ca.key (права не шире 0400); по умолчанию "
+                   "переменная окружения GATEKEEPER_CA_KEY_PASSPHRASE")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,14 +33,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", help="по умолчанию /var/lib/gatekeeper")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("init", help="создать каталоги, CA и серверный сертификат")
-    s.add_argument("--host", action="append", required=True, help="DNS-имя или IP шлюза (можно несколько)")
+    s = sub.add_parser("init", help="создать каталоги, CA и серверный сертификат (можно повторять)")
+    s.add_argument("--host", action="append", help="DNS-имя или IP шлюза (можно несколько)")
     s.add_argument("--ca-key-out", required=True, help="куда записать ca.key (храните офлайн)")
+    s.add_argument("--ca-key", help="ключ CA для завершения прерванного init (по умолчанию --ca-key-out)")
+    s.add_argument("--ca-key-pass-file", help=_PASS_FILE_HELP)
     s.set_defaults(func=init.run)
 
     s = sub.add_parser("add-client", help="выпустить пакет клиента")
     s.add_argument("--id", required=True)
     s.add_argument("--ca-key", required=True, help="путь к ca.key")
+    s.add_argument("--ca-key-pass-file", help=_PASS_FILE_HELP)
     s.add_argument("--out", required=True, help="каталог для пакета клиента")
     s.add_argument("--days", type=int, default=90)
     s.add_argument("--allow", action="append", default=[], help="METHOD:path, например POST:sendMessage")
@@ -53,9 +61,18 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("renew", help="выпустить клиенту новый сертификат и ключ (права сохраняются)")
     s.add_argument("--id", required=True)
     s.add_argument("--ca-key", required=True, help="путь к ca.key")
+    s.add_argument("--ca-key-pass-file", help=_PASS_FILE_HELP)
     s.add_argument("--out", required=True, help="каталог для нового пакета")
     s.add_argument("--days", type=int, default=90)
     s.set_defaults(func=renew.run)
+
+    s = sub.add_parser("renew-server", help="перевыпустить серверный сертификат шлюза")
+    s.add_argument("--ca-key", required=True, help="путь к ca.key (офлайн)")
+    s.add_argument("--ca-key-pass-file", help=_PASS_FILE_HELP)
+    s.add_argument("--host", action="append",
+                   help="DNS-имя или IP шлюза; по умолчанию SAN текущего сертификата")
+    s.add_argument("--days", type=int, default=365)
+    s.set_defaults(func=renew_server.run)
 
     s = sub.add_parser("pending", help="заявки на подтверждение опасных действий")
     s.set_defaults(func=confirm.pending)
@@ -73,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--anchors", help="файл внешних якорей (см. audit-anchor): сверить журнал и с ними")
     s.set_defaults(func=audit_verify.run)
 
+    s = sub.add_parser("audit-repair", help="отрезать недописанную последнюю строку журнала")
+    s.set_defaults(func=audit_repair.run)
+
     s = sub.add_parser("audit-anchor", help="проверить журнал и выдать якорь его головы")
     s.add_argument("--out", help="дописать якорь в этот файл (держите его вне каталога данных шлюза)")
     s.set_defaults(func=audit_anchor.run)
@@ -80,12 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("decoy-create", help="создать приманку (фальшивый пакет клиента)")
     s.add_argument("--name", required=True)
     s.add_argument("--ca-key", required=True, help="путь к ca.key")
+    s.add_argument("--ca-key-pass-file", help=_PASS_FILE_HELP)
     s.add_argument("--out", required=True, help="каталог для пакета приманки")
     s.add_argument("--days", type=int, default=365)
     s.add_argument("--hint", default="", help="где вы её разместили (для журнала)")
     s.set_defaults(func=decoy_create.run)
 
-    s = sub.add_parser("status", help="сводка: клиенты, журнал, состояние")
+    s = sub.add_parser("status", help="сводка: клиенты, сертификат, журнал, состояние")
     s.set_defaults(func=status.run)
 
     s = sub.add_parser("run", help="запустить шлюз")

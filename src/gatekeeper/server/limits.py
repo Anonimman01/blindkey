@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import math
 import threading
 from collections import OrderedDict, defaultdict
@@ -18,6 +19,21 @@ if TYPE_CHECKING:
     from gatekeeper.server.state import StateStore
 
 DEFAULT_MAX_KEYS = 10_000
+
+
+def normalize_ip(ip: str) -> str:
+    """Ключ для лимитов соединений: IPv4 — как есть, IPv6 — сеть /64 (C-13).
+
+    Клиенту обычно выдаётся целая /64, поэтому адреса из одной сети не должны
+    занимать все слоты `max_per_ip` по отдельности.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
 
 
 class IpBanList:
@@ -100,6 +116,10 @@ class ConnectionLimiter:
     def total(self) -> int:
         with self._lock:
             return self._total
+
+    @property
+    def max_total(self) -> int:
+        return self._max_total
 
 
 class RateLimiter:
@@ -189,6 +209,13 @@ class DailyBudget:
     def used(self, client_id: str) -> int:
         with self._lock:
             return self._used.get(client_id, 0)
+
+    def can_spend(self, client_id: str, amount: int = 1) -> bool:
+        """Проверить квоту, ничего не тратя (чтобы отказ не «съедал» подтверждение)."""
+        day = self._clock() // 86400
+        with self._lock:
+            used = self._used.get(client_id, 0) if day == self._day else 0
+            return used + amount <= self._limit
 
     def seconds_until_reset(self) -> int:
         """Секунд до начала следующих суток по UTC (для Retry-After)."""

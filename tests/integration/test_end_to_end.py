@@ -1,14 +1,11 @@
 """Сквозной тест: настоящий mTLS-шлюз на 127.0.0.1 + клиент + fake_telegram."""
 import asyncio
 import json
-import socket
 import ssl
-import threading
-import time
-from types import SimpleNamespace
 
 import pytest
-from fake_telegram import FILE_BODY, FakeTelegram
+from fake_telegram import FILE_BODY
+from support import TOKEN, Server, api, attempt, free_port, tls_ctx
 
 from gatekeeper.cli.main import main
 from gatekeeper.client.botapi import BotApi, GatewayError
@@ -16,111 +13,6 @@ from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.pki import ca
 from gatekeeper.server.app import build_app
 from gatekeeper.server.config import load_config
-from gatekeeper.store.layout import Layout
-
-TOKEN = "123456789:AAH-fakeFAKEfakeFAKEfakeFAKEfake12345"
-ALLOW = ["GET:getMe", "POST:sendMessage", "POST:getFile", "POST:downloadFile", "POST:getUpdates"]
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class Server:
-    def __init__(self, app, port):
-        self.app, self.port = app, port
-        self.loop = asyncio.new_event_loop()
-        self.task = None
-
-    def start(self):
-        started = threading.Event()
-
-        def run():
-            asyncio.set_event_loop(self.loop)
-
-            async def main_():
-                self.task = asyncio.current_task()
-                started.set()
-                await self.app.serve()
-
-            try:
-                self.loop.run_until_complete(main_())
-            except asyncio.CancelledError:
-                pass
-            finally:
-                self.loop.close()
-
-        self.thread = threading.Thread(target=run, daemon=True)
-        self.thread.start()
-        started.wait(5)
-        for _ in range(100):
-            try:
-                socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
-                return
-            except OSError:
-                time.sleep(0.05)
-        raise RuntimeError("gateway did not start")
-
-    def stop(self):
-        self.loop.call_soon_threadsafe(self.task.cancel)
-        self.thread.join(5)
-
-
-@pytest.fixture()
-def gw(tmp_path, monkeypatch):
-    monkeypatch.setenv("GATEKEEPER_UPSTREAM_TOKEN", TOKEN)
-    fake = FakeTelegram(TOKEN)
-    fake.start()
-    cfgd, datad = tmp_path / "cfg", tmp_path / "data"
-    cakey, bundle, decoy = tmp_path / "off" / "ca.key", tmp_path / "alice", tmp_path / "decoy"
-    cakey.parent.mkdir()
-    base = ["--config-dir", str(cfgd), "--data-dir", str(datad)]
-    assert main([*base, "init", "--host", "127.0.0.1", "--ca-key-out", str(cakey)]) == 0
-    allow = [x for a in ALLOW for x in ("--allow", a)]
-    assert main([*base, "add-client", "--id", "alice", "--ca-key", str(cakey), "--out", str(bundle), *allow]) == 0
-    port = free_port()
-    (cfgd / "config.toml").write_text(
-        f'[server]\nlisten_host="127.0.0.1"\nlisten_port={port}\n'
-        f'[provider]\nname="telegram"\nupstream_host="127.0.0.1"\nupstream_port={fake.port}\n'
-        f'upstream_tls=false\n[limits]\ndecoy_ban_seconds=2\nheader_timeout=1.0\nbody_timeout=1.0\n', encoding="utf-8")
-    layout = Layout.from_args(str(cfgd), str(datad))
-    server = Server(build_app(layout, load_config(layout.config_file)), port)
-    server.start()
-    yield SimpleNamespace(fake=fake, port=port, bundle=bundle, layout=layout, base=base,
-                          cakey=cakey, decoy=decoy, tmp=tmp_path)
-    server.stop()
-    fake.stop()
-
-
-def api(gw, bundle=None):
-    return BotApi(str(bundle or gw.bundle), "127.0.0.1", gw.port)
-
-
-def attempt(gw, ctx):
-    """'refused', если шлюз оборвал соединение или TLS; иначе полученные байты."""
-    try:
-        with (
-            socket.create_connection(("127.0.0.1", gw.port), timeout=5) as raw,
-            ctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls,
-        ):
-            tls.sendall(b"GET /getMe HTTP/1.1\r\nHost: x\r\n\r\n")
-            data = tls.recv(200)
-    except OSError:
-        return "refused"
-    return data or "refused"
-
-
-def tls_ctx(gw, cert=None, key=None, maxv=None):
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # даже тестовый клиент не говорит на TLS < 1.2
-    ctx.load_verify_locations(cafile=str(gw.bundle / "ca.pem"))
-    if cert:
-        ctx.load_cert_chain(str(cert), str(key))
-    if maxv:
-        ctx.maximum_version = maxv
-    return ctx
 
 
 def test_get_me_send_message_and_files(gw):

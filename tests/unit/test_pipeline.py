@@ -175,3 +175,25 @@ def test_bad_content_type_is_400(tmp_path):
     req = make_req(env.fp)
     req.headers["content-type"] = "text/html"
     assert call(env, req)[0] == 400 and not env.up.calls
+
+
+def test_intent_is_written_before_the_upstream_call(tmp_path):
+    """C-07: запись намерения идёт раньше действия."""
+    env = make_env(tmp_path)
+    assert call(env, make_req(env.fp))[0] == 200
+    text = audit_text(env)
+    assert text.index("request_intent") < text.index("request_ok")
+
+
+def test_audit_failure_prevents_the_upstream_call(tmp_path, monkeypatch):
+    """C-07: если намерение не записалось, провайдер не вызывается."""
+    from gatekeeper.core.errors import AuditError
+
+    env = make_env(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise AuditError("disk full")
+
+    monkeypatch.setattr(env.p.audit, "_flush", boom)
+    status, _ = call(env, make_req(env.fp))
+    assert status == 500 and not env.up.calls

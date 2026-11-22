@@ -3,7 +3,7 @@
 import socket
 import time
 
-from test_end_to_end import api, tls_ctx
+from support import api, tls_ctx
 
 
 def raw(gw, payload: bytes, wait: float = 5.0) -> bytes:

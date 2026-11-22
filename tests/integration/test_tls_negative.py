@@ -2,7 +2,7 @@
 import ssl
 from datetime import timedelta
 
-from test_end_to_end import attempt, tls_ctx
+from support import attempt, tls_ctx
 
 from gatekeeper.pki import ca
 

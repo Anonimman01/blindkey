@@ -6,6 +6,9 @@ listen_host = "127.0.0.1"   # на VPS: "0.0.0.0" или адрес интерф
 listen_port = 8443
 # metrics_socket = "/run/gatekeeper/ops.sock"  # GET /healthz и /metrics, только локально (Unix-сокет, 0600)
 # persist_state = true      # nonce, бюджет, баны и аномалии в state.db переживают перезапуск
+# audit_max_bytes = 67108864  # 64 МиБ: при переполнении журнал начинает новый сегмент (0 = без ротации)
+# audit_keep = 10          # сколько прошлых сегментов audit.log.<ts> хранить
+# max_total_response_bytes = 268435456  # 256 МиБ: общий потолок памяти под ответы upstream
 
 [provider]
 name = "telegram"
@@ -47,5 +50,7 @@ autofreeze_window = 60
 [confirm]
 # Опасные методы API: выполняются только после `gatekeeper approve --id ...` на машине шлюза.
 # Подтверждение одноразовое и привязано к клиенту, методу и телу запроса. Пусто = выключено.
+# Тело подтверждаемого метода обязано быть строгим JSON (без дублей ключей, NaN, Infinity):
+# только так оператор видит в `gatekeeper pending` ровно те параметры, которые уйдут upstream.
 # apis = ["deleteMessage", "banChatMember"]
 ttl = 300   # секунд на подтверждение и на жизнь заявки

@@ -1,10 +1,16 @@
-"""gatekeeper add-client: выпустить сертификат + ключ подписи, зарегистрировать клиента."""
+"""gatekeeper add-client: выпустить сертификат + ключ подписи, зарегистрировать клиента.
+
+Порядок: сначала пакет на диске, затем запись в реестре. Иначе при сбое посередине в реестре
+оставался бы активный клиент без пакета, и `add-client` с тем же id уже не повторить.
+"""
 from __future__ import annotations
 
 import secrets as _secrets
+from contextlib import suppress
 from pathlib import Path
 
 from gatekeeper.cli import output
+from gatekeeper.cli.cakey import load_ca_key, read_passphrase
 from gatekeeper.core import constants
 from gatekeeper.core.errors import GatekeeperError, PolicyError
 from gatekeeper.core.events import EventType
@@ -29,6 +35,22 @@ def _valid_rule(rule: str) -> bool:
     return True
 
 
+def _write_bundle(out: Path, files: dict[str, bytes]) -> list[Path]:
+    written: list[Path] = []
+    out.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        for name, data in files.items():
+            path = out / name
+            ca.write_private_file(path, data)
+            written.append(path)
+    except (GatekeeperError, OSError):
+        for path in written:
+            with suppress(OSError):
+                path.unlink()
+        raise
+    return written
+
+
 def run(args, layout: Layout) -> int:
     if not is_valid_client_id(args.id):
         output.error("invalid client id (letters/digits/._-, must start with letter or digit, max 64)")
@@ -42,12 +64,14 @@ def run(args, layout: Layout) -> int:
         output.error(f"unknown provider: {provider} (known: {', '.join(KNOWN_PROVIDERS)})")
         return 1
     out = Path(args.out)
-    if out.exists() and any(out.iterdir()):
+    out_existed = out.exists()
+    if out_existed and any(out.iterdir()):
         output.error(f"output directory is not empty: {out}")
         return 1
     try:
+        passphrase = read_passphrase(args)
         ca_cert = ca.load_cert_pem(layout.ca_cert.read_bytes())
-        ca_key = ca.load_key_pem(Path(args.ca_key).read_bytes())
+        ca_key = load_ca_key(Path(args.ca_key), passphrase)
         reg = Registry(layout.clients_file)
         if args.id in reg.load():
             raise RegistryError(f"client already exists: {args.id}")
@@ -69,23 +93,43 @@ def run(args, layout: Layout) -> int:
     }
     if provider is not None:
         entry["provider"] = provider  # без поля клиент работает с первым провайдером шлюза
+    # Пакет — до реестра (см. docstring): при сбое клиента в реестре ещё нет.
+    try:
+        _write_bundle(out, {
+            "ca.pem": ca.cert_to_pem(ca_cert),
+            "client.pem": ca.cert_to_pem(cert),
+            "client.key": ca.key_to_pem(key),
+            "master.secret": master.hex().encode("ascii"),
+        })
+    except (GatekeeperError, OSError) as exc:
+        if not out_existed:
+            with suppress(OSError):
+                out.rmdir()
+        output.error(f"cannot write the client bundle: {exc}")
+        return 1
     try:
         reg.add(args.id, entry)
     except GatekeeperError as exc:
+        for name in ("ca.pem", "client.pem", "client.key", "master.secret"):
+            with suppress(OSError):
+                (out / name).unlink()
+        if not out_existed:
+            with suppress(OSError):
+                out.rmdir()
         output.error(str(exc))
         return 1
 
-    out.mkdir(mode=0o700, parents=True, exist_ok=True)
-    ca.write_private_file(out / "ca.pem", ca.cert_to_pem(ca_cert))
-    ca.write_private_file(out / "client.pem", ca.cert_to_pem(cert))
-    ca.write_private_file(out / "client.key", ca.key_to_pem(key))
-    ca.write_private_file(out / "master.secret", master.hex().encode("ascii"))
-
-    AuditChain(FileSink(layout.audit_log), secrets=(master,)).append(
-        EventType.CLIENT_ADDED,
-        {"client": args.id, "fingerprint": fp, "allow": list(args.allow), "days": args.days,
-         **({"provider": provider} if provider else {})},
-    )
+    try:
+        AuditChain(FileSink(layout.audit_log), secrets=(master,)).append(
+            EventType.CLIENT_ADDED,
+            {"client": args.id, "fingerprint": fp, "allow": list(args.allow), "days": args.days,
+             **({"provider": provider} if provider else {})},
+        )
+    except (GatekeeperError, OSError) as exc:
+        output.info(f"client {args.id} added, fingerprint {fp}, bundle written to {out}")
+        output.error(f"WARNING: the client is registered but the event was not recorded in the "
+                     f"journal: {exc}")
+        return 0
     output.info(f"client {args.id} added, fingerprint {fp}")
     output.info(f"bundle written to {out} (client.key and master.secret are secret)")
     return 0

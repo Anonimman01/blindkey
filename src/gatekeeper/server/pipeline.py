@@ -1,15 +1,22 @@
 """Конвейер обработки запроса: дешёвое раньше дорогого, любая ошибка = отказ.
 
 Порядок: решение по приманке -> идентификация -> заголовки -> время -> подпись ->
-nonce -> политика -> лимиты -> upstream -> фильтр ответа. В журнал пишется всё,
-включая отказы; клиенту уходит нейтральный ответ без причины.
+nonce -> политика -> лимиты -> квота -> подтверждение -> запись намерения -> upstream ->
+фильтр ответа -> запись результата. В журнал пишется всё, включая отказы; клиенту уходит
+нейтральный ответ без причины.
 
 Подписывается request-target как есть (например "/sendMessage") и HTTP-метод.
+
+Запись намерения (`request_intent`) идёт ДО обращения к провайдеру (C-07): если журнал
+недоступен, действие не выполняется и клиент получает ошибку, которую безопасно повторить.
+SQLite-состояние (nonce, квота, баны, аномалии) пишется через `asyncio.to_thread` (B-04):
+fsync-шторм не останавливает event loop.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import time
 from collections.abc import Callable, Mapping
 
@@ -17,11 +24,11 @@ from gatekeeper.core import constants
 from gatekeeper.core.errors import SigningError
 from gatekeeper.core.events import EventType, Severity
 from gatekeeper.core.kdf import derive_signing_key
-from gatekeeper.core.redact import redact_text
 from gatekeeper.core.signing import build_canonical_string, verify
 from gatekeeper.core.timeutil import is_fresh, unix_now
 from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.audit.chain import AuditChain
+from gatekeeper.server.confirm_body import ConfirmBodyError, describe_params, parse_confirm_params
 from gatekeeper.server.http_io import ParsedRequest
 from gatekeeper.server.http_response import build_response, neutral_response
 from gatekeeper.server.identity import IdentityStore
@@ -30,11 +37,9 @@ from gatekeeper.server.nonce_cache import NonceCache
 from gatekeeper.server.observe import Metrics, new_request_id, request_id, stamp
 from gatekeeper.server.providers.base import Provider, ProviderError
 from gatekeeper.server.upstream import Upstream, UpstreamError
-from gatekeeper.store.approvals import Approvals, make_preview
+from gatekeeper.store.approvals import Approvals
 
 _H = {k: getattr(constants, f"HEADER_{k.upper()}").lower() for k in ("client", "epoch", "time", "nonce", "sig")}
-# Сколько байт тела берётся для предпросмотра подтверждения (показывается ~200 символов).
-_PREVIEW_SOURCE_BYTES = 2048
 _PASSTHROUGH = frozenset({400, 401, 403, 404, 409, 429, 500, 502, 503})
 
 
@@ -118,7 +123,8 @@ class Pipeline:
     async def _maybe_autofreeze(self, client: str, etype, ip: str,
                                 anomalies: AnomalyMonitor) -> None:
         """Порог аномалий достигнут: замораживаем клиента (как `gatekeeper freeze`)."""
-        count = anomalies.record(client, etype)
+        # StateStore пишет в SQLite: не в потоке event loop.
+        count = await asyncio.to_thread(anomalies.record, client, etype)
         if count is None or self.freeze_client is None:
             return
         try:
@@ -134,8 +140,8 @@ class Pipeline:
     def _upstream_metric(self, provider: str, status: str, started: float) -> None:
         if self.metrics is not None:
             self.metrics.inc("gk_upstream_requests_total", provider=provider, status=status)
-            self.metrics.inc("gk_upstream_seconds_sum", time.monotonic() - started, provider=provider)
-            self.metrics.inc("gk_upstream_seconds_count", provider=provider)
+            self.metrics.observe("gk_upstream_seconds", time.monotonic() - started,
+                                 provider=provider)
 
     def _needs_confirm(self, api_name: str, pname: str | None = None) -> bool:
         """Сравнение без учёта регистра: Telegram принимает имена методов в любом регистре,
@@ -147,16 +153,19 @@ class Pipeline:
     async def _confirm(self, cid: str, decision, req: ParsedRequest, ip: str) -> tuple[str | None, bytes | None]:
         """Опасный метод: (id подтверждения, None) если подтверждён, иначе (None, ответ-отказ).
 
-        Подтверждение расходуется здесь же. Если следом сработает дневной бюджет, подтверждение
-        пропадёт, и оператору придётся подтвердить заново.
+        Тело разбирается как строгое JSON (дубли ключей и NaN запрещены), оператору
+        показываются параметры, а не первые байты тела (C-04). Подтверждение расходуется
+        здесь же; квота проверяется до этого вызова, поэтому отказ по бюджету его не съедает.
         """
         approvals = self.approvals
         if approvals is None:  # вызывается только при включённых подтверждениях
             raise RuntimeError("approvals are not configured")
         api = decision.api_name
-        # Предпросмотр короткий: маскируем только начало тела, а не весь мегабайт.
-        text = req.body[:_PREVIEW_SOURCE_BYTES].decode("utf-8", "replace")
-        preview = make_preview(redact_text(text, self._all_secrets))
+        try:
+            params = await asyncio.to_thread(parse_confirm_params, req.body)
+            preview = await asyncio.to_thread(describe_params, params, self._all_secrets)
+        except ConfirmBodyError as exc:
+            return None, await self._deny(EventType.DENY_MALFORMED, 400, str(exc), ip, cid)
         res = await asyncio.to_thread(
             approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip)
         if res.state == "approved":
@@ -180,8 +189,7 @@ class Pipeline:
                 resp = neutral_response(500)
             if self.metrics is not None:
                 self.metrics.inc("gk_requests_total", status=resp[9:12].decode("ascii", "replace"))
-                self.metrics.inc("gk_request_seconds_sum", time.monotonic() - started)
-                self.metrics.inc("gk_request_seconds_count")
+                self.metrics.observe("gk_request_seconds", time.monotonic() - started)
             return stamp(resp, rid)
         finally:
             request_id.reset(token)
@@ -189,7 +197,7 @@ class Pipeline:
     async def _handle(self, req: ParsedRequest, ip: str, peer_der: bytes | None) -> bytes:
         ident = self.identity.identify(peer_der)
         if ident.fingerprint and self.decoy_check and self.decoy_check(ident.fingerprint):
-            self.bans.ban(ip, self.decoy_ban_seconds)
+            await asyncio.to_thread(self.bans.ban, ip, self.decoy_ban_seconds)
             await self._log(EventType.DECOY_TRIGGERED,
                             {"ip": ip, "fingerprint": ident.fingerprint}, Severity.ALERT)
             return neutral_response(403)
@@ -215,7 +223,8 @@ class Pipeline:
             good = False
         if not good:
             return await self._deny(EventType.DENY_BAD_SIGNATURE, 403, "bad_signature", ip, cid)
-        if not self.nonces.check_and_add(cid, nonce):  # только после проверки подписи
+        # StateStore пишет в SQLite: выносим из event loop (B-04).
+        if not await asyncio.to_thread(self.nonces.check_and_add, cid, nonce):
             return await self._deny(EventType.DENY_REPLAY, 403, "replay_or_cache_full", ip, cid)
 
         decision = rec.policy.check(req.method, req.target)
@@ -228,12 +237,17 @@ class Pipeline:
         if not self.client_limiter.allow(cid):
             return await self._deny(EventType.DENY_RATE_LIMIT, 429, "rate", ip, cid,
                                     retry_after=self.client_limiter.retry_after(cid))
+        # Квоту проверяем ДО подтверждения, а тратим после: отказ по бюджету не должен
+        # «съедать» одобрение оператора (и подтверждение не должно тратиться впустую).
+        if not self.budget.can_spend(cid):
+            return await self._deny(EventType.DENY_BUDGET, 429, "daily_budget", ip, cid,
+                                    retry_after=self.budget.seconds_until_reset())
         confirmed = None
         if self.approvals is not None and self._needs_confirm(decision.api_name, pname):
             confirmed, refusal = await self._confirm(cid, decision, req, ip)
             if refusal is not None:
                 return refusal
-        if not self.budget.try_spend(cid):
+        if not await asyncio.to_thread(self.budget.try_spend, cid):
             return await self._deny(EventType.DENY_BUDGET, 429, "daily_budget", ip, cid,
                                     retry_after=self.budget.seconds_until_reset())
 
@@ -247,6 +261,14 @@ class Pipeline:
         if sem.locked():  # изоляция: медленный провайдер не занимает все слоты шлюза
             return await self._deny(EventType.DENY_RATE_LIMIT, 503, "provider_busy", ip, cid,
                                     retry_after=1)
+        # Намерение в журнал ДО upstream (C-07): при сбое записи действие не выполняется,
+        # поэтому клиент может безопасно повторить запрос.
+        intent: dict = {"client": cid, "api": api, "provider": pname, "ip": ip,
+                        "method": req.method, "bytes": len(req.body),
+                        "body_sha256": hashlib.sha256(req.body).hexdigest()}
+        if confirmed:
+            intent["confirmed"] = confirmed
+        await self._log(EventType.REQUEST_INTENT, intent)
         t0 = time.monotonic()
         try:
             async with sem:

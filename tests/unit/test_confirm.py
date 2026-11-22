@@ -245,13 +245,17 @@ def test_queue_full_is_alert_and_denied(tmp_path):
     assert "confirm_queue_full" in audit_text(env)
 
 
-def test_budget_checked_after_approval(tmp_path):
-    env = make_env(tmp_path, budget=1)
+def test_budget_denial_does_not_consume_approval(tmp_path):
+    """Отказ по квоте не должен «съедать» одобрение оператора."""
+    env = make_env(tmp_path, budget=2)
     st = arm(env, tmp_path)
-    assert call(env, make_req(env.fp, method="GET", target="/getMe", body=b""))[0] == 200  # бюджет израсходован
-    call(env, make_req(env.fp))
+    assert call(env, make_req(env.fp, method="GET", target="/getMe", body=b""))[0] == 200
+    assert call(env, make_req(env.fp))[0] == 403          # заявка создана
     st.approve(st.list_items()[0][0])
-    assert call(env, make_req(env.fp))[0] == 429 and not env.up.calls[1:]
+    assert call(env, make_req(env.fp, method="GET", target="/getMe", body=b""))[0] == 200
+    # Квота исчерпана (2/2): отказ приходит до подтверждения, одобрение не тратится.
+    assert call(env, make_req(env.fp))[0] == 429 and not env.up.calls[2:]
+    assert [v["status"] for _rid, v in st.list_items()] == ["approved"]
 
 
 def test_approvals_store_failure_fails_closed(tmp_path):

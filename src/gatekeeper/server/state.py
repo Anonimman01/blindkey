@@ -7,6 +7,9 @@
 но не обязана переживать внезапную потерю питания (последние транзакции могут пропасть).
 Для nonce с окном в десятки секунд и для квоты это приемлемо; журнал аудита по-прежнему
 пишется с fsync. Любая ошибка БД пробрасывается наверх, и конвейер отвечает отказом (fail closed).
+
+Все вызовы из event loop идут через `asyncio.to_thread` (конвейер, сервер): fsync-шторм
+блокирует поток-исполнитель, а не все соединения сразу (B-04). Класс потокобезопасен.
 """
 from __future__ import annotations
 
@@ -43,6 +46,7 @@ class StateStore:
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.execute("PRAGMA busy_timeout=5000")  # ждать, а не падать при чужом писателе
         self._db.executescript(_SCHEMA)
         harden_sqlite_files(self.path)  # -wal/-shm создаются sqlite только что
 

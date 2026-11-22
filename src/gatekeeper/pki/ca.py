@@ -174,6 +174,32 @@ def cert_to_pem(cert: x509.Certificate) -> bytes:
     return cert.public_bytes(serialization.Encoding.PEM)
 
 
+def cert_not_after(cert: x509.Certificate) -> datetime:
+    """Момент истечения сертификата (UTC)."""
+    return _not_after(cert)
+
+
+def cert_expires_in_days(cert: x509.Certificate, now: datetime | None = None) -> int:
+    """Сколько целых дней осталось до истечения (отрицательное = уже истёк)."""
+    return int((_not_after(cert) - (now or _now())).total_seconds() // 86400)
+
+
+def cert_hosts(cert: x509.Certificate) -> list[str]:
+    """SAN сертификата (DNS-имена и IP) — чтобы продление не теряло адреса."""
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return []
+    return [str(name.value) for name in san
+            if isinstance(name, (x509.DNSName, x509.IPAddress))]
+
+
+def key_matches_cert(key: ec.EllipticCurvePrivateKey, cert: x509.Certificate) -> bool:
+    """Относится ли приватный ключ к этому сертификату."""
+    fmt, enc = serialization.PublicFormat.SubjectPublicKeyInfo, serialization.Encoding.DER
+    return key.public_key().public_bytes(enc, fmt) == cert.public_key().public_bytes(enc, fmt)
+
+
 def key_to_pem(key: ec.EllipticCurvePrivateKey, password: bytes | None = None) -> bytes:
     enc = (
         serialization.BestAvailableEncryption(password)

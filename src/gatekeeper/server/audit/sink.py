@@ -147,6 +147,18 @@ class FileSink:
         except FileNotFoundError:
             return b""
 
+    def truncate(self, size: int) -> None:
+        """Отрезать файл до size байт (используется починкой оборванной строки)."""
+        try:
+            fd = os.open(self.path, os.O_WRONLY | _BINARY)
+        except FileNotFoundError as exc:
+            raise AuditError("audit log is missing") from exc
+        try:
+            os.ftruncate(fd, size)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
     def read_head(self) -> tuple[int, str] | None:
         try:
             raw = self.head_path.read_text("ascii").strip()

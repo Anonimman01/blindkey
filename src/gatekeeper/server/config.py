@@ -23,6 +23,9 @@ _MAX_BURST = 1_000_000
 _MAX_DAILY_BUDGET = 100_000_000
 _MAX_TIMEOUT = 3600.0
 _MAX_RATE = 100_000.0
+_MIN_AUDIT_BYTES = 1024 * 1024
+_MAX_AUDIT_BYTES = 4 * 1024 * 1024 * 1024  # 4 ГиБ: журнал и суммарный объём ответов
+_MAX_AUDIT_KEEP = 10_000
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -73,6 +76,11 @@ class Config:
     upstream_tls: bool = True
     max_connections: int = 100
     max_per_ip: int = 10
+    # Ротация журнала: 0 = выключена (журнал растёт без границ).
+    audit_max_bytes: int = 64 * 1024 * 1024
+    audit_keep: int = 10  # сколько прошлых сегментов журнала хранить
+    # Общий потолок байт, которые одновременно буферизуются для ответов upstream (C-14).
+    max_total_response_bytes: int = 256 * 1024 * 1024
     rate_per_sec: float = 5.0
     burst: int = 10
     daily_budget: int = 10000
@@ -104,7 +112,8 @@ class Config:
 
 _SCHEMA: dict[str, dict[str, type]] = {
     "server": {"listen_host": str, "listen_port": int, "metrics_socket": str,
-               "persist_state": bool, "default_provider": str},
+               "persist_state": bool, "default_provider": str,
+               "audit_max_bytes": int, "audit_keep": int, "max_total_response_bytes": int},
     "provider": {
         "name": str, "secret_env": str, "secret_file": str,
         "upstream_host": str, "upstream_port": int, "upstream_tls": bool,
@@ -213,6 +222,21 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError(f"timeouts must be in (0, {_MAX_TIMEOUT:g}] seconds")
     if not 0 < cfg.rate_per_sec <= _MAX_RATE:
         raise ConfigError(f"rate_per_sec must be in (0, {_MAX_RATE:g}]")
+    if cfg.audit_max_bytes != 0 and not (
+            _MIN_AUDIT_BYTES <= cfg.audit_max_bytes <= _MAX_AUDIT_BYTES):
+        raise ConfigError(
+            f"audit_max_bytes must be 0 (no rotation) or between {_MIN_AUDIT_BYTES} "
+            f"and {_MAX_AUDIT_BYTES}")
+    if not 1 <= cfg.audit_keep <= _MAX_AUDIT_KEEP:
+        raise ConfigError(f"audit_keep must be between 1 and {_MAX_AUDIT_KEEP}")
+    if not _MIN_AUDIT_BYTES <= cfg.max_total_response_bytes <= _MAX_AUDIT_BYTES:
+        raise ConfigError(
+            f"max_total_response_bytes must be between {_MIN_AUDIT_BYTES} "
+            f"and {_MAX_AUDIT_BYTES}")
+    if cfg.max_total_response_bytes < max(
+            pc.max_response_bytes for pc in cfg.effective_providers()):
+        raise ConfigError(
+            "max_total_response_bytes must not be smaller than a provider's max_response_bytes")
     if cfg.decoy_ban_seconds < 0:
         raise ConfigError("decoy_ban_seconds must be >= 0")
     if cfg.autofreeze_threshold < 0 or cfg.autofreeze_window <= 0:

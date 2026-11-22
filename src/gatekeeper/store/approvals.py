@@ -32,6 +32,9 @@ MIN_ID_PREFIX = 6       # короче префикс в CLI не принима
 MAX_PENDING = 100       # всего заявок и подтверждений в файле
 MAX_PER_CLIENT = 20     # на одного клиента
 PREVIEW_LEN = 200
+# Для параметров подтверждаемого JSON-запроса места больше: оператор должен видеть все
+# ключи запроса, а не начало тела (C-04).
+PARAM_PREVIEW_LEN = 400
 
 
 class ApprovalError(GatekeeperError):
@@ -93,9 +96,16 @@ class Approvals:
         if ttl <= 0:
             raise ValueError("ttl must be positive")
         self.path, self.ttl, self._clock = Path(path), ttl, clock
+        self.last_dropped = 0  # сколько повреждённых записей проигнорировано последним чтением
 
     # ---- файл ----
-    def _read(self) -> dict[str, dict]:
+    def _read(self) -> tuple[dict[str, dict], int]:
+        """Вернуть (годные записи, число выброшенных повреждённых).
+
+        Повреждённая запись больше не ломает весь файл (B-10): она пропускается, а
+        `list_items`/`request` перезаписывают файл без неё. Некорректная структура
+        самого файла по-прежнему ошибка: иначе его легко принять за пустой.
+        """
         try:
             harden_private_file(self.path)  # владелец, не симлинк, режим 0600
         except FilePermissionError as exc:
@@ -103,17 +113,24 @@ class Approvals:
         try:
             raw = self.path.read_text("utf-8")
         except FileNotFoundError:
-            return {}
+            return {}, 0
         try:
             doc = json.loads(raw)
             items = doc["items"]
             if doc.get("version") != 1 or not isinstance(items, dict):
                 raise ValueError("bad structure")
-            for key, v in items.items():
-                _validate_entry(key, v)
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ApprovalError("approvals.json is malformed (fix or delete the file)") from exc
-        return items
+        valid: dict[str, dict] = {}
+        dropped = 0
+        for key, v in items.items():
+            try:
+                _validate_entry(key, v)
+            except ValueError:
+                dropped += 1  # повреждённая/подделанная запись: не даём ей сломать остальные
+                continue
+            valid[key] = v
+        return valid, dropped
 
     def _save(self, items: dict[str, dict]) -> None:
         data = json.dumps({"version": 1, "items": items}, indent=2, sort_keys=True)
@@ -156,8 +173,8 @@ class Approvals:
         key = request_key(client_id, http_method, api, body)
         rid = key[:ID_LEN]
         with self._locked():
-            items = self._read()
-            changed = self._purge(items)
+            items, dropped = self._read()
+            changed = self._purge(items) or dropped > 0
             entry = items.get(key)
             if entry is not None and entry.get("status") == APPROVED:
                 del items[key]
@@ -184,12 +201,24 @@ class Approvals:
 
     # ---- оператор ----
     def list_items(self) -> list[tuple[str, dict]]:
-        """Действующие заявки и подтверждения (id, запись), старые первыми."""
+        """Действующие заявки и подтверждения (id, запись), старые первыми.
+
+        Повреждённые записи пропускаются и удаляются из файла; их число — в `last_dropped`.
+        """
         with self._locked():
-            items = self._read()
-            if self._purge(items):
+            items, dropped = self._read()
+            if self._purge(items) or dropped:
                 self._save(items)
+        self.last_dropped = dropped
         return sorted(((k[:ID_LEN], v) for k, v in items.items()), key=lambda t: t[1]["created"])
+
+    def peek(self, prefix: str) -> dict:
+        """Показать заявку, ничего не меняя (нужно, чтобы записать журнал до действия)."""
+        with self._locked():
+            items, _dropped = self._read()
+            self._purge(items)
+            key = self._resolve(items, prefix)
+            return dict(items[key], id=key[:ID_LEN])
 
     @staticmethod
     def _resolve(items: dict[str, dict], prefix: str) -> str:
@@ -206,7 +235,7 @@ class Approvals:
     def approve(self, prefix: str) -> dict:
         """Подтвердить заявку: срок подтверждения отсчитывается от этого момента."""
         with self._locked():
-            items = self._read()
+            items, _dropped = self._read()
             self._purge(items)
             key = self._resolve(items, prefix)
             entry = items[key]
@@ -220,7 +249,7 @@ class Approvals:
     def reject(self, prefix: str) -> dict:
         """Отклонить заявку или отозвать неиспользованное подтверждение."""
         with self._locked():
-            items = self._read()
+            items, _dropped = self._read()
             self._purge(items)
             key = self._resolve(items, prefix)
             entry = items.pop(key)

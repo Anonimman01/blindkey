@@ -131,3 +131,24 @@ def test_bad_record_does_not_break_batch(tmp_path):
         chain.append("request_ok", {"bad": object()})
     chain.append("request_ok", {"i": 2})
     assert verify_file(tmp_path / "a" / "audit.log", tmp_path / "a" / "chain.head").last_seq == 1
+
+
+def test_latency_metrics_are_real_histograms(tmp_path):
+    """B-09: gk_*_seconds отдаются как гистограмма, histogram_quantile работает."""
+    env = make_env(tmp_path)
+    env.p.metrics = Metrics()
+    call(env, make_req(env.fp))
+    text = env.p.metrics.render()
+    assert 'gk_request_seconds_bucket{le="+Inf"} 1' in text
+    assert "gk_request_seconds_count 1" in text
+    assert "gk_request_seconds_sum" in text
+    assert 'gk_upstream_seconds_bucket{provider="telegram",le="+Inf"} 1' in text
+    assert "gk_upstream_seconds_count" in text
+
+
+def test_request_id_header_constant_matches_the_response():
+    """B-08: константа и фактический заголовок ответа — одно и то же имя."""
+    from gatekeeper.core import constants
+
+    assert constants.HEADER_REQUEST_ID == "X-Request-Id"
+    assert b"X-Request-Id" in stamp(b"HTTP/1.1 200 OK\r\n\r\n", "abc")

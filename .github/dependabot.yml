@@ -7,7 +7,22 @@ updates:
     # Не поднимать нижние границы в pyproject.toml без необходимости:
     # точные версии задаёт requirements.lock.
     versioning-strategy: increase-if-necessary
+    groups:
+      python:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+# Dependabot не пересобирает requirements.lock/requirements-dev.lock (они собраны
+# pip-compile с хешами). Поэтому PR Dependabot по pyproject.toml обновляет только
+# нижние границы, а lockfiles обновляются вручную перед мержем:
+#
+#     scripts/update_lock.sh
+#
+# Джоб CI `lock` (scripts/check_lock.py) падает, если lock разошёлся с .in или
+# потерял хеши, так что дрейф не попадёт в main незамеченным.

@@ -1,6 +1,12 @@
-"""gatekeeper pending / approve / reject: подтверждение опасных действий. Шлюз подхватывает сразу."""
+"""gatekeeper pending / approve / reject: подтверждение опасных действий. Шлюз подхватывает сразу.
+
+Порядок для approve/reject: сначала журнал, затем изменение заявки (C-05). Одобрение — это
+разрешение на действие, поэтому след в журнале должен появиться раньше самого разрешения; если
+журнал недоступен, подтверждение не выдаётся.
+"""
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
 
 from gatekeeper.cli import output
@@ -30,10 +36,14 @@ def _fmt_time(ts: int) -> str:
 
 def pending(args, layout: Layout) -> int:
     try:
-        items = _store(layout).list_items()
+        store = _store(layout)
+        items = store.list_items()
     except (GatekeeperError, OSError) as exc:
         output.error(str(exc))
         return 1
+    if store.last_dropped:
+        output.error(f"warning: {store.last_dropped} damaged approval record(s) were ignored "
+                     "and removed from approvals.json")
     if not items:
         output.info("no pending requests")
         return 0
@@ -42,7 +52,8 @@ def pending(args, layout: Layout) -> int:
         output.info(f"{rid}\t{state}\t{e['client']}\t{e['method']}:{e['api']}\t"
                     f"{e['body_len']} bytes\tsha256 {e['body_sha256'][:12]}\t"
                     f"until {_fmt_time(e['expires'])} UTC")
-        output.info(f"    {make_preview(e.get('preview', ''))}")
+        # В preview лежат разобранные параметры запроса, а не первые байты тела (C-04).
+        output.info(f"    params: {make_preview(e.get('preview', ''))}")
     return 0
 
 
@@ -53,12 +64,23 @@ def _make(action: str):
     def run(args, layout: Layout) -> int:
         try:
             store = _store(layout)
-            e = getattr(store, action)(args.id)
+            e = store.peek(args.id)  # ничего не меняет: нужно для записи в журнал
             AuditChain(FileSink(layout.audit_log)).append(
                 event, {"client": e["client"], "api": e["api"], "approval": e["id"],
                         "body_sha256": e["body_sha256"]}, sev)
         except (GatekeeperError, OSError) as exc:
             output.error(str(exc))
+            return 1
+        try:
+            getattr(store, action)(args.id)
+        except (GatekeeperError, OSError) as exc:
+            # Журнал уже говорит о намерении: фиксируем, что действие не выполнено.
+            with suppress(GatekeeperError, OSError):
+                AuditChain(FileSink(layout.audit_log)).append(
+                    EventType.CONFIRM_ACTION_FAILED,
+                    {"client": e["client"], "api": e["api"], "approval": e["id"],
+                     "action": action, "error": type(exc).__name__}, Severity.ALERT)
+            output.error(f"{action} failed after the intent was recorded: {exc}")
             return 1
         output.info(f"{action}d {e['id']}: {e['client']} {e['method']}:{e['api']}")
         return 0

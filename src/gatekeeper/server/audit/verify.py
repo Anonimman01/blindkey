@@ -29,10 +29,14 @@ class VerifyResult:
     line_no: int | None = None  # номер строки с первой ошибкой (с 1)
     head_checked: bool = False  # сверена ли голова из chain.head
     anchors_checked: int = 0  # сколько внешних якорей сошлось с журналом
+    # Машиночитаемая причина для тех, кто умеет починить проблему сам (audit-repair,
+    # автоусечение оборванной строки). Текст error для оператора, code для логики.
+    code: str | None = None
 
 
-def _fail(msg: str, line_no: int | None, count: int = 0, **kw) -> VerifyResult:
-    return VerifyResult(ok=False, count=count, error=msg, line_no=line_no, **kw)
+def _fail(msg: str, line_no: int | None, count: int = 0, *, code: str | None = None,
+          **kw) -> VerifyResult:
+    return VerifyResult(ok=False, count=count, error=msg, line_no=line_no, code=code, **kw)
 
 
 def verify_lines(
@@ -46,9 +50,9 @@ def verify_lines(
         try:
             rec = json.loads(line.decode("ascii"))
         except (UnicodeDecodeError, ValueError):
-            return _fail("line is not valid JSON", n, i), hashes
+            return _fail("line is not valid JSON", n, i, code="bad_json"), hashes
         if not isinstance(rec, dict) or set(rec) != RECORD_KEYS:
-            return _fail("record has wrong fields", n, i), hashes
+            return _fail("record has wrong fields", n, i, code="bad_fields"), hashes
         seq, ts, etype, sev = rec["seq"], rec["ts"], rec["type"], rec["sev"]
         data, rprev, rhash = rec["data"], rec["prev"], rec["hash"]
         if (
@@ -58,20 +62,23 @@ def verify_lines(
             or not isinstance(data, dict)
             or not isinstance(rprev, str) or not isinstance(rhash, str)
         ):
-            return _fail("record has wrong field types", n, i), hashes
+            return _fail("record has wrong field types", n, i, code="bad_field_types"), hashes
         if seq != start_seq + i:
-            return _fail("sequence number mismatch (record removed or reordered)", n, i), hashes
+            return _fail("sequence number mismatch (record removed or reordered)", n, i,
+                         code="seq_mismatch"), hashes
         if rprev != prev:
-            return _fail("prev hash does not match previous record", n, i), hashes
+            return _fail("prev hash does not match previous record", n, i,
+                         code="prev_mismatch"), hashes
         try:
             expected_hash = compute_hash(prev, canonical_body(seq, ts, etype, sev, data))
         except (ValueError, AuditError):
-            return _fail("record cannot be hashed", n, i), hashes
+            return _fail("record cannot be hashed", n, i, code="bad_hash"), hashes
         if rhash != expected_hash:
-            return _fail("record hash mismatch (record was modified)", n, i), hashes
+            return _fail("record hash mismatch (record was modified)", n, i,
+                         code="hash_mismatch"), hashes
         canon_line, _ = serialize_record(seq, ts, etype, sev, data, prev)
         if canon_line != line:
-            return _fail("record is not in canonical form", n, i), hashes
+            return _fail("record is not in canonical form", n, i, code="non_canonical"), hashes
         prev = rhash
         hashes.append(rhash)
     last_seq = start_seq + len(lines) - 1 if lines else start_seq - 1
@@ -103,20 +110,23 @@ def verify_file(
             head_exc = exc
         data = sink.read_bytes()
     if data and not data.endswith(b"\n"):
-        return _fail("log ends with an incomplete line", len(data.split(b"\n")))
+        return _fail("log ends with an incomplete line", len(data.split(b"\n")),
+                     code="incomplete_tail")
     lines = data.split(b"\n")[:-1] if data else []
     result, hashes = verify_lines(lines)
     if not result.ok:
         return result
     if head_exc is not None:
-        return _fail(str(head_exc), None, result.count)
+        return _fail(str(head_exc), None, result.count, code="bad_head")
     head_checked = False
     if head is not None:
         hseq, hhash = head
         if hseq > result.last_seq:
-            return _fail("log is shorter than chain.head (tail removed)", None, result.count)
+            return _fail("log is shorter than chain.head (tail removed)", None, result.count,
+                         code="tail_removed")
         if hashes[hseq] != hhash:
-            return _fail("chain.head does not match log", None, result.count)
+            return _fail("chain.head does not match log", None, result.count,
+                         code="head_mismatch")
         # hseq < last_seq допустимо: сбой между записью строки и обновлением head.
         head_checked = True
     if anchors:
