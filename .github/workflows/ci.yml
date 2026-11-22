@@ -36,10 +36,16 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: requirements-dev.lock
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.lock
+      # --no-deps: pip-compile не кладёт в lock pip и setuptools, поэтому с --require-hashes
+      # pip упал бы на зависимостях pip-api/pip-tools. Lock полный, транзитивные пакеты в нём есть.
+      # dev-lock не включает runtime-зависимости, поэтому ставим оба файла.
       - name: Install pinned dependencies
         run: |
-          python -m pip install --require-hashes -r requirements-dev.lock
+          python -m pip install --require-hashes --no-deps -r requirements.lock
+          python -m pip install --require-hashes --no-deps -r requirements-dev.lock
           python -m pip install --no-deps -e .
       # Включая scripts/: demo_github.py тоже должен проходить линтер (B-18).
       - name: Ruff
@@ -68,10 +74,16 @@ jobs:
           python-version: ${{ matrix.python }}
           allow-prereleases: true
           cache: pip
-          cache-dependency-path: requirements-dev.lock
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.lock
+      # --no-deps: pip-compile не кладёт в lock pip и setuptools, поэтому с --require-hashes
+      # pip упал бы на зависимостях pip-api/pip-tools. Lock полный, транзитивные пакеты в нём есть.
+      # dev-lock не включает runtime-зависимости, поэтому ставим оба файла.
       - name: Install pinned dependencies
         run: |
-          python -m pip install --require-hashes -r requirements-dev.lock
+          python -m pip install --require-hashes --no-deps -r requirements.lock
+          python -m pip install --require-hashes --no-deps -r requirements-dev.lock
           python -m pip install --no-deps -e .
       - name: Tests
         run: python -m pytest -q --cov --cov-report=term-missing
@@ -84,5 +96,5 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
-      - run: python -m pip install --require-hashes -r requirements-dev.lock
+      - run: python -m pip install --require-hashes --no-deps -r requirements-dev.lock
       - run: python -m pip_audit --strict --require-hashes -r requirements.lock

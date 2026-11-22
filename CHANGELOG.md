@@ -56,7 +56,8 @@
 
 ### Security
 - CI: `actions/checkout`, `actions/setup-python`, `github/codeql-action` запинены по commit SHA (B-06).
-  Инструменты CI ставятся из `requirements-dev.lock` с хешами (B-13). Новый джоб `lock`
+  Инструменты CI ставятся из `requirements-dev.lock` с хешами (B-13), runtime-зависимости из
+  `requirements.lock`; оба файла ставятся с `--no-deps`, потому что pip и setuptools в lock не входят. Новый джоб `lock`
   (`scripts/check_lock.py`) падает при расхождении `.in`/lock или отсутствии хешей; Dependabot
   lockfiles не пересобирает — `scripts/update_lock.sh` (B-07). Ruff проверяет и `scripts/` (B-18).
 - Тесты интеграции больше не импортируют фикстуры из тест-модуля: общие помощники в
