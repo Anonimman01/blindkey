@@ -120,7 +120,9 @@ getUpdates на бота, выдавайте правило одному кли�
     gatekeeper add-client --id tgbot --provider telegram --allow POST:sendMessage ...
     gatekeeper add-client --id ci --provider github --allow GET:getUser ...
 
-Клиент без поля `provider` (выпущенный раньше) работает с первым провайдером из конфига. Нужны оба
+Клиент без поля `provider` работает с `[server] default_provider` (если не задан, то с первым провайдером; при нескольких провайдерах шлюз тогда не запустится, пока такие клиенты есть, либо задайте `default_provider`, либо перевыпустите их с `--provider`).
+
+На провайдера задаются `confirm_apis`, `max_response_bytes`, `max_inflight`; метрики `gk_upstream_*` имеют метку `provider`. Нужны оба
 провайдера одному приложению: выпустите ему два клиента (два сертификата). Если провайдер клиента
 не настроен на шлюзе, запрос получает отказ `provider_unavailable`. Секреты всех провайдеров маскируются в журнале и предпросмотре подтверждений; в записи `request_ok` есть поле `provider`.
 

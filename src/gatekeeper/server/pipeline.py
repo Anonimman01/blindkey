@@ -50,6 +50,8 @@ class Pipeline:
                  providers: Mapping[str, Provider] | None = None,
                  upstreams: Mapping[str, Upstream] | None = None,
                  default_provider: str | None = None,
+                 provider_confirm: Mapping[str, frozenset[str]] | None = None,
+                 max_inflight: Mapping[str, int] | None = None,
                  audit: AuditChain, nonces: NonceCache, client_limiter: RateLimiter,
                  budget: DailyBudget, bans: IpBanList,
                  decoy_check: Callable[[str], bool] | None = None,
@@ -75,6 +77,10 @@ class Pipeline:
             raise ValueError("default_provider is not among providers")
         self.provider = self.providers[self.default_provider]  # по умолчанию (совместимость)
         self.upstream = self.upstreams[self.default_provider]
+        # confirm_apis провайдера добавляются к общим; лимит одновременных запросов на провайдера
+        self._provider_confirm = {k: frozenset(v) for k, v in (provider_confirm or {}).items()}
+        self._inflight = {name: asyncio.Semaphore(max((max_inflight or {}).get(name, 32), 1))
+                          for name in self.providers}
         self._all_secrets = tuple(s for pv in self.providers.values() for s in pv.known_secrets())
         self.identity, self.audit = identity, audit
         self.nonces, self.client_limiter, self.budget, self.bans = nonces, client_limiter, budget, bans
@@ -125,11 +131,18 @@ class Pipeline:
                         {"client": client, "auto": True, "trigger": getattr(etype, "value", str(etype)),
                          "count": count, "window": anomalies.window, "ip": ip}, Severity.ALERT)
 
-    def _needs_confirm(self, api_name: str) -> bool:
+    def _upstream_metric(self, provider: str, status: str, started: float) -> None:
+        if self.metrics is not None:
+            self.metrics.inc("gk_upstream_requests_total", provider=provider, status=status)
+            self.metrics.inc("gk_upstream_seconds_sum", time.monotonic() - started, provider=provider)
+            self.metrics.inc("gk_upstream_seconds_count", provider=provider)
+
+    def _needs_confirm(self, api_name: str, pname: str | None = None) -> bool:
         """Сравнение без учёта регистра: Telegram принимает имена методов в любом регистре,
         поэтому правило `POST:sendmessage` не должно обходить `[confirm] apis = ["sendMessage"]`."""
         name = api_name.casefold()
-        return any(name == a.casefold() for a in self.confirm_apis)
+        pool = self.confirm_apis | self._provider_confirm.get(pname or self.default_provider, frozenset())
+        return any(name == a.casefold() for a in pool)
 
     async def _confirm(self, cid: str, decision, req: ParsedRequest, ip: str) -> tuple[str | None, bytes | None]:
         """Опасный метод: (id подтверждения, None) если подтверждён, иначе (None, ответ-отказ).
@@ -208,11 +221,15 @@ class Pipeline:
         decision = rec.policy.check(req.method, req.target)
         if decision is None:
             return await self._deny(EventType.DENY_POLICY, 403, "not_allowed", ip, cid)
+        pname = rec.provider or self.default_provider
+        provider, upstream = self.providers.get(pname), self.upstreams.get(pname)
+        if provider is None or upstream is None:  # провайдер клиента не настроен на этом шлюзе
+            return await self._deny(EventType.DENY_POLICY, 403, "provider_unavailable", ip, cid)
         if not self.client_limiter.allow(cid):
             return await self._deny(EventType.DENY_RATE_LIMIT, 429, "rate", ip, cid,
                                     retry_after=self.client_limiter.retry_after(cid))
         confirmed = None
-        if self.approvals is not None and self._needs_confirm(decision.api_name):
+        if self.approvals is not None and self._needs_confirm(decision.api_name, pname):
             confirmed, refusal = await self._confirm(cid, decision, req, ip)
             if refusal is not None:
                 return refusal
@@ -221,25 +238,29 @@ class Pipeline:
                                     retry_after=self.budget.seconds_until_reset())
 
         api = decision.api_name
-        pname = rec.provider or self.default_provider
-        provider, upstream = self.providers.get(pname), self.upstreams.get(pname)
-        if provider is None or upstream is None:  # провайдер клиента не настроен на этом шлюзе
-            return await self._deny(EventType.DENY_POLICY, 403, "provider_unavailable", ip, cid)
         try:
             up_req = provider.build_request(
                 api, decision.rule.http_method, req.body, req.headers.get("content-type"))
         except ProviderError as exc:
             return await self._deny(EventType.DENY_MALFORMED, 400, str(exc), ip, cid)
+        sem = self._inflight[pname]
+        if sem.locked():  # изоляция: медленный провайдер не занимает все слоты шлюза
+            return await self._deny(EventType.DENY_RATE_LIMIT, 503, "provider_busy", ip, cid,
+                                    retry_after=1)
+        t0 = time.monotonic()
         try:
-            timeout = provider.upstream_timeout(api, req.body)
-            if timeout is None:
-                up_resp = await upstream.fetch(up_req)
-            else:
-                up_resp = await upstream.fetch(up_req, timeout=timeout)
+            async with sem:
+                timeout = provider.upstream_timeout(api, req.body)
+                if timeout is None:
+                    up_resp = await upstream.fetch(up_req)
+                else:
+                    up_resp = await upstream.fetch(up_req, timeout=timeout)
         except UpstreamError as exc:
-            await self._log("upstream_error", {"reason": str(exc), "client": cid, "api": api, "ip": ip},
-                            Severity.WARNING)
+            self._upstream_metric(pname, "error", t0)
+            await self._log("upstream_error", {"reason": str(exc), "client": cid, "api": api,
+                                               "provider": pname, "ip": ip}, Severity.WARNING)
             return neutral_response(502)
+        self._upstream_metric(pname, str(up_resp.status), t0)
         # фильтр разбирает тело до нескольких МБ: не в потоке event loop
         safe = await asyncio.to_thread(provider.filter_response, up_resp)
         if safe is None:

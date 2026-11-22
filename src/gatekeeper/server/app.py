@@ -8,6 +8,7 @@ import signal
 import ssl
 import stat
 
+from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.events import EventType
 from gatekeeper.pki import ca as pki_ca
 from gatekeeper.server.anomaly import AnomalyMonitor
@@ -218,6 +219,27 @@ class GatekeeperApp:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _validate_client_providers(*, registry_path, names: tuple[str, ...], default: str | None) -> None:
+    """Опечатка в имени провайдера или «неявный» провайдер должны ломать запуск, а не запросы."""
+    try:
+        clients = Registry(registry_path).load()
+    except GatekeeperError:
+        return  # битый реестр обнаружат своими проверками
+    unknown = sorted(cid for cid, e in clients.items()
+                     if isinstance(e, dict) and e.get("provider") not in (None, *names))
+    if unknown:
+        raise ConfigError(f"clients refer to providers missing from config: {unknown}")
+    if len(names) > 1 and default is None:
+        implicit = sorted(cid for cid, e in clients.items()
+                          if isinstance(e, dict) and e.get("provider") is None
+                          and e.get("status") != "revoked")
+        if implicit:
+            raise ConfigError(
+                "several providers are configured but these clients have no provider and "
+                f"default_provider is not set: {implicit} (set [server] default_provider "
+                "or re-issue the clients with --provider)")
+
+
 def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     # Существующие файлы данных: права 0600, владелец, не симлинк (создание даёт 0600 само).
     for private in (layout.audit_log, layout.audit_log.parent / "chain.head",
@@ -229,7 +251,9 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
         secret = load_secret(pc.secret_env, pc.secret_file)
         providers[pc.name] = create_provider(pc.name, secret, pc.upstream_host, pc.upstream_port)
         upstreams[pc.name] = Upstream(providers[pc.name].host, providers[pc.name].port,
-                                      use_tls=pc.upstream_tls)
+                                      use_tls=pc.upstream_tls, max_response=pc.max_response_bytes)
+    _validate_client_providers(registry_path=layout.clients_file, names=tuple(providers),
+                               default=cfg.default_provider)
     all_secrets = tuple(s for pv in providers.values() for s in pv.known_secrets())
     audit = AuditChain(FileSink(layout.audit_log), secrets=all_secrets)
     store = StateStore(layout.state_db) if cfg.persist_state else None
@@ -247,8 +271,13 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
         decoy_check=DecoyStore(layout.decoys_file).is_decoy, decoy_ban_seconds=cfg.decoy_ban_seconds,
         anomalies=AnomalyMonitor(cfg.autofreeze_threshold, cfg.autofreeze_window, store=store),
         freeze_client=lambda cid: registry.set_status(cid, "frozen"),
-        approvals=Approvals(layout.approvals_file, cfg.confirm_ttl) if cfg.confirm_apis else None,
-        confirm_apis=frozenset(cfg.confirm_apis))
+        approvals=(Approvals(layout.approvals_file, cfg.confirm_ttl)
+                   if cfg.confirm_apis or any(pc.confirm_apis for pc in cfg.effective_providers())
+                   else None),
+        confirm_apis=frozenset(cfg.confirm_apis),
+        default_provider=cfg.default_provider or next(iter(providers)),
+        provider_confirm={pc.name: frozenset(pc.confirm_apis) for pc in cfg.effective_providers()},
+        max_inflight={pc.name: pc.max_inflight for pc in cfg.effective_providers()})
     return GatekeeperApp(
         pipeline=pipeline, bans=bans,
         limiter=ConnectionLimiter(cfg.max_connections, cfg.max_per_ip), audit=audit,

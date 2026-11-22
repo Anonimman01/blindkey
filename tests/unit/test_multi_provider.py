@@ -150,3 +150,89 @@ def test_config_legacy_single_provider_still_works(tmp_path):
 def test_config_rejects_bad_providers(tmp_path, text):
     with pytest.raises(ConfigError):
         _cfg(tmp_path, text)
+
+
+# ---- гибрид, этап A: явный default, проверка при старте, изоляция провайдеров ----
+def test_busy_provider_does_not_block_other(tmp_path):
+    env = _env(tmp_path)
+    env.p._inflight["github"] = asyncio.Semaphore(0)  # слоты github исчерпаны
+    assert _call(env, "ghbot", "/getUser") == 503
+    assert not env.ups["github"].calls
+    assert _call(env, "tgbot", "/getMe") == 200
+
+
+def test_unknown_provider_denied_before_budget_is_spent(tmp_path):
+    env = _env(tmp_path)
+    del env.p.providers["github"], env.p.upstreams["github"]
+    assert _call(env, "ghbot", "/getUser") == 403
+    assert env.p.budget.try_spend("ghbot")  # бюджет не тронут отказом
+
+
+def test_confirm_apis_are_per_provider(tmp_path):
+    env = _env(tmp_path)
+    env.p._provider_confirm = {"telegram": frozenset({"deleteMessage"}), "github": frozenset()}
+    assert env.p._needs_confirm("deletemessage", "telegram")
+    assert not env.p._needs_confirm("deleteMessage", "github")
+
+
+def test_provider_metrics_and_log_field(tmp_path):
+    from gatekeeper.server.observe import Metrics
+
+    env = _env(tmp_path)
+    env.p.metrics = Metrics()
+    _call(env, "ghbot", "/getUser")
+    text = env.p.metrics.render()
+    assert 'gk_upstream_requests_total{provider="github",status="200"} 1' in text
+
+
+def _registry(tmp_path, entries):
+    reg = Registry(tmp_path / "clients.json")
+    reg.init_empty()
+    for cid, prov in entries:
+        e = {"fingerprint": cid.encode().hex().ljust(64, "0")[:64], "master_secret": MASTER.hex(),
+             "status": "active", "created": 0, "expires": 2**40, "allow": ["GET:getMe"]}
+        if prov:
+            e["provider"] = prov
+        reg.add(cid, e)
+    return reg.path
+
+
+def test_startup_rejects_client_with_unknown_provider(tmp_path):
+    from gatekeeper.server.app import _validate_client_providers
+
+    path = _registry(tmp_path, [("a", "gitlab")])
+    with pytest.raises(ConfigError, match="missing from config"):
+        _validate_client_providers(registry_path=path, names=("telegram", "github"), default=None)
+
+
+def test_startup_rejects_implicit_provider_with_several(tmp_path):
+    from gatekeeper.server.app import _validate_client_providers
+
+    path = _registry(tmp_path, [("old", None)])
+    with pytest.raises(ConfigError, match="default_provider"):
+        _validate_client_providers(registry_path=path, names=("telegram", "github"), default=None)
+    # явный default или единственный провайдер: можно
+    _validate_client_providers(registry_path=path, names=("telegram", "github"), default="telegram")
+    _validate_client_providers(registry_path=path, names=("telegram",), default=None)
+
+
+def test_config_default_and_limits(tmp_path):
+    cfg = _cfg(tmp_path, '[server]\ndefault_provider = "github"\n'
+                         '[providers.telegram]\n[providers.github]\nmax_inflight = 4\n'
+                         'confirm_apis = ["createIssue"]\nmax_response_bytes = 1048576\n')
+    assert cfg.default_provider == "github"
+    gh = cfg.effective_providers()[1]
+    assert (gh.max_inflight, gh.confirm_apis, gh.max_response_bytes) == (4, ("createIssue",), 1048576)
+
+
+@pytest.mark.parametrize("text", [
+    '[server]\ndefault_provider = "slack"\n[providers.telegram]\n',
+    "[providers.telegram]\nmax_inflight = 0\n",
+    "[providers.telegram]\nmax_inflight = 100000\n",
+    "[providers.telegram]\nmax_response_bytes = 10\n",
+    "[providers.telegram]\nmax_response_bytes = 9999999999\n",
+    '[providers.telegram]\nconfirm_apis = ["bad name!"]\n',
+])
+def test_config_rejects_bad_hybrid_values(tmp_path, text):
+    with pytest.raises(ConfigError):
+        _cfg(tmp_path, text)

@@ -45,10 +45,15 @@ class ProviderCfg:
     upstream_host: str | None = None
     upstream_port: int = 443
     upstream_tls: bool = True
+    confirm_apis: tuple[str, ...] = ()       # к общему [confirm] apis добавляются методы провайдера
+    max_response_bytes: int = 21_000_000     # потолок размера ответа upstream (память на фильтр)
+    max_inflight: int = 32                   # одновременных запросов к upstream этого провайдера
 
 
 _PROVIDER_KEYS = {"secret_env": str, "secret_file": str, "upstream_host": str,
-                  "upstream_port": int, "upstream_tls": bool}
+                  "upstream_port": int, "upstream_tls": bool, "confirm_apis": list,
+                  "max_response_bytes": int, "max_inflight": int}
+_MIN_RESPONSE, _MAX_RESPONSE, _MAX_INFLIGHT = 1024, 64 * 1024 * 1024, 1000
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,9 @@ class Config:
     # Несколько провайдеров на одном шлюзе: таблицы [providers.<имя>]. Пусто = один провайдер
     # из [provider] (прежний формат).
     providers: tuple[ProviderCfg, ...] = ()
+    # Провайдер для клиентов без поля provider. Не задан = первый в конфиге; при нескольких
+    # провайдерах такие клиенты запрещены, пока default_provider не указан явно.
+    default_provider: str | None = None
 
     def effective_providers(self) -> tuple[ProviderCfg, ...]:
         """Список провайдеров шлюза; первый используется для клиентов без поля provider."""
@@ -96,7 +104,7 @@ class Config:
 
 _SCHEMA: dict[str, dict[str, type]] = {
     "server": {"listen_host": str, "listen_port": int, "metrics_socket": str,
-               "persist_state": bool},
+               "persist_state": bool, "default_provider": str},
     "provider": {
         "name": str, "secret_env": str, "secret_file": str,
         "upstream_host": str, "upstream_port": int, "upstream_tls": bool,
@@ -209,7 +217,17 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError("decoy_ban_seconds must be >= 0")
     if cfg.autofreeze_threshold < 0 or cfg.autofreeze_window <= 0:
         raise ConfigError("autofreeze_threshold must be >= 0 and autofreeze_window > 0")
+    names = [pc.name for pc in cfg.effective_providers()]
+    if cfg.default_provider is not None and cfg.default_provider not in names:
+        raise ConfigError(f"default_provider {cfg.default_provider!r} is not a configured provider")
     for pc in cfg.effective_providers():
+        if not _MIN_RESPONSE <= pc.max_response_bytes <= _MAX_RESPONSE:
+            raise ConfigError(f"[providers.{pc.name}] max_response_bytes must be between "
+                              f"{_MIN_RESPONSE} and {_MAX_RESPONSE}")
+        if not 1 <= pc.max_inflight <= _MAX_INFLIGHT:
+            raise ConfigError(f"[providers.{pc.name}] max_inflight must be between 1 and {_MAX_INFLIGHT}")
+        if not all(is_valid_api_name(a) for a in pc.confirm_apis):
+            raise ConfigError(f"[providers.{pc.name}] confirm_apis contains an invalid API name")
         if not 1 <= pc.upstream_port <= 65535:
             raise ConfigError("port out of range")
         if not pc.upstream_tls and not _is_loopback_host(pc.upstream_host):
