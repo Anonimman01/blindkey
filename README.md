@@ -1,10 +1,10 @@
 # gatekeeper
 
-Лёгкий mTLS-шлюз для Telegram Bot API и GitHub REST API. Настоящий токен хранится только на шлюзе,
+Лёгкий mTLS-шлюз для Telegram Bot API, GitHub, OpenAI, Vercel и Cloudflare. Настоящий токен хранится только на шлюзе,
 клиенты (боты, скрипты, агенты) получают отзываемые сертификаты с белым списком методов. Шлюз
 проверяет подпись каждого запроса, ведёт журнал с цепочкой хешей и ловит использование приманок.
 
-Репозиторий называется blindkey, пакет и команда `gatekeeper`. Версия 0.3.6, лицензия Apache-2.0.
+Репозиторий называется blindkey, пакет и команда `gatekeeper`. Версия 0.3.7, лицензия Apache-2.0.
 Независимого аудита нет, см. [SECURITY.md](SECURITY.md) и [docs/threat-model.md](docs/threat-model.md).
 Один экземпляр шлюза может обслуживать несколько провайдеров (`[providers.<имя>]`, см. ниже); каждый клиент привязан к одному из них.
 
@@ -126,6 +126,37 @@ getUpdates на бота, выдавайте правило одному кли�
 провайдера одному приложению: выпустите ему два клиента (два сертификата). Если провайдер клиента
 не настроен на шлюзе, запрос получает отказ `provider_unavailable`. Секреты всех провайдеров маскируются в журнале и предпросмотре подтверждений; в записи `request_ok` есть поле `provider`.
 
+## OpenAI, Vercel и Cloudflare
+
+Подключаются так же, как GitHub: таблицы `[providers.openai]`, `[providers.vercel]`,
+`[providers.cloudflare]` (секрет по умолчанию в `GATEKEEPER_<ИМЯ>_TOKEN` или в `secret_file`):
+
+    [providers.openai]
+    secret_file = "/etc/gatekeeper/openai.key"
+    max_response_bytes = 16777216
+    [providers.cloudflare]
+    confirm_apis = ["createDnsRecord", "purgeCache"]
+
+    gatekeeper add-client --id agent --provider openai --allow POST:chatCompletions ...
+
+- **OpenAI:** `listModels` (`GET`), `chatCompletions`, `createResponse`, `createEmbedding` (`POST` с
+  JSON-телом). Стриминг (`stream: true`) запрещён: шлюз отдаёт ответ целиком. Шлюз ограничивает число
+  запросов клиента, но не расход токенов и деньги: лимит трат задайте в самом OpenAI (project budget).
+- **Vercel (только чтение):** `getUser`, `listProjects`, `listDeployments`, `listDomains`, `getProject`,
+  `getDeployment`. Политика не допускает query-параметров, поэтому `teamId` передать нельзя: выпустите
+  токен, ограниченный командой или проектом.
+- **Cloudflare:** `verifyToken`, `listAccounts`, `listZones`, `getZone`, `listDnsRecords`,
+  `createDnsRecord`, `purgeCache`. Нужен API-токен (`cfut_`, `cfat_` или старый 40-символьный), Global
+  API Key не поддерживается. Выдайте токену минимальные права и добавьте `createDnsRecord` и
+  `purgeCache` в `confirm_apis`.
+
+Методы с идентификатором принимают его в JSON-теле `POST`, шлюз сам вставляет его в путь и выбирает
+метод upstream: `BotApi(...).call("getDeployment", {"id": "dpl_..."})`. Для долгих ответов OpenAI передайте
+`timeout=120` (клиентский таймаут по умолчанию 30 с). Новый метод
+добавляется одной строкой в таблицу `ROUTES` провайдера (`src/gatekeeper/server/providers/`). Шлюз
+поддерживает только `GET` и `POST`: методы `PUT`, `PATCH`, `DELETE` (изменение и удаление DNS-записей,
+удаление деплоев) недоступны.
+
 ## GitHub вместо Telegram
 
 В `config.toml`:
@@ -224,7 +255,7 @@ getUpdates на бота, выдавайте правило одному кли�
 - Без внешних якорей удаление хвоста журнала вместе с `chain.head` не обнаруживается; якоря
   создаются вручную или по cron (`audit-anchor`), автоматической отправки нет.
 - Подтверждения не защищают от оператора, который одобряет не глядя, и от компрометации самого шлюза.
-- Реализованы провайдеры Telegram и GitHub; несколько провайдеров на одном шлюзе с версии 0.3.5
+- Реализованы провайдеры Telegram, GitHub, OpenAI, Vercel и Cloudflare; несколько провайдеров на одном шлюзе с версии 0.3.5
   (клиент привязан к одному провайдеру; приложению, которому нужны оба, выдаются два клиента).
   v2: ротация ключей, один клиент на несколько провайдеров, очереди getUpdates, больше методов GitHub.
 

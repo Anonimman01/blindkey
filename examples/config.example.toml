@@ -23,6 +23,8 @@ secret_env = "GATEKEEPER_UPSTREAM_TOKEN"
 # secret_env = "GATEKEEPER_TELEGRAM_TOKEN"    # по умолчанию GATEKEEPER_<ИМЯ>_TOKEN
 # [providers.github]
 # secret_file = "/etc/gatekeeper/github.token"
+# [providers.openai]       # также vercel, cloudflare; секрет по умолчанию в GATEKEEPER_<ИМЯ>_TOKEN
+# secret_file = "/etc/gatekeeper/openai.key"
 # Клиенты без поля provider идут к default_provider (в [server]); не задан = первый в файле,
 # но при нескольких провайдерах шлюз тогда не запустится, пока такие клиенты есть.
 # На провайдера: confirm_apis = ["deleteMessage"], max_response_bytes = 8388608, max_inflight = 32

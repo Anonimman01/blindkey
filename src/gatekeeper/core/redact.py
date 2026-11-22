@@ -27,6 +27,10 @@ _PATTERNS = [
         r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:(?!-----).){0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY-----",
         re.DOTALL,
     ),
+    # ключи OpenAI, токены Vercel и Cloudflare (общий вид; точные значения маскируются по known_secrets)
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bvc[a-z]_[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bcf(?:ut|at|k)_[A-Za-z0-9_-]{40,}"),
     # Authorization: Bearer xxx
     re.compile(r"(?i)(?<=bearer )[A-Za-z0-9._~+/=-]{8,}"),
 ]

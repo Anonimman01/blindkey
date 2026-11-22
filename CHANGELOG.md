@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-22
+
+### Added
+- Провайдеры `openai`, `vercel` и `cloudflare` (токен в `Authorization: Bearer`, как у GitHub).
+  Общая основа `server/providers/bearer.py`: фиксированная таблица маршрутов, строгая проверка
+  формата токена, фильтр ответа как у остальных провайдеров.
+- Параметры пути (идентификатор проекта, деплоя, зоны) клиент передаёт в JSON-теле `POST`, шлюз
+  проверяет их строгим шаблоном и сам выбирает метод upstream. Тело запроса разбирается и отправляется
+  upstream заново: дубли ключей, `NaN`/`Infinity`, вложенность глубже 64 и не-JSON отклоняются.
+- OpenAI: `listModels`, `chatCompletions`, `createResponse`, `createEmbedding`; `stream: true`
+  запрещён (ответ буферизуется целиком), таймаут upstream 120 с.
+- Vercel (только чтение): `getUser`, `listProjects`, `listDeployments`, `listDomains`, `getProject`,
+  `getDeployment`. Cloudflare: `verifyToken`, `listAccounts`, `listZones`, `getZone`, `listDnsRecords`,
+  `createDnsRecord`, `purgeCache` (Global API Key не поддерживается).
+- Маскирование в журнале: общие шаблоны для ключей OpenAI (`sk-`), токенов Vercel (`vc?_`) и Cloudflare.
+- `add-client --provider` принимает все известные провайдеры.
+
+### Changed
+- Версия 0.3.7 не меняет протокол и существующих провайдеров.
+
 ## [0.3.5] - 2026-11-22
 
 ### Added

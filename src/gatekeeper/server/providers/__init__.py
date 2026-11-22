@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from gatekeeper.server.providers.base import Provider, ProviderError
+from gatekeeper.server.providers.cloudflare import CloudflareProvider
 from gatekeeper.server.providers.github import GitHubProvider
+from gatekeeper.server.providers.openai import OpenAIProvider
 from gatekeeper.server.providers.telegram import TelegramProvider
+from gatekeeper.server.providers.vercel import VercelProvider
 
-KNOWN_PROVIDERS = ("telegram", "github")
+KNOWN_PROVIDERS = ("telegram", "github", "openai", "vercel", "cloudflare")
 
 
 def create_provider(name: str, secret: str, host: str | None = None, port: int = 443) -> Provider:
@@ -13,4 +16,10 @@ def create_provider(name: str, secret: str, host: str | None = None, port: int =
         return TelegramProvider(secret, host=host or "api.telegram.org", port=port)
     if name == "github":
         return GitHubProvider(secret, host=host or "api.github.com", port=port)
+    if name == "openai":
+        return OpenAIProvider(secret, host=host, port=port)
+    if name == "vercel":
+        return VercelProvider(secret, host=host, port=port)
+    if name == "cloudflare":
+        return CloudflareProvider(secret, host=host, port=port)
     raise ProviderError(f"unknown provider: {name}")
