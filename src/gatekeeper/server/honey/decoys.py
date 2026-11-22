@@ -40,7 +40,7 @@ class DecoyStore:
             if doc.get("version") != 1 or not isinstance(decoys, dict):
                 raise ValueError
             for e in decoys.values():
-                if not _HEX64.match(e["fingerprint"]):
+                if not _HEX64.fullmatch(e["fingerprint"]):
                     raise ValueError
         except (ValueError, KeyError, TypeError) as exc:
             raise DecoyError("decoys.json is malformed") from exc
@@ -66,7 +66,7 @@ class DecoyStore:
         return fingerprint in self._fps
 
     def add(self, name: str, fingerprint: str, created: int, hint: str = "") -> None:
-        if not _HEX64.match(fingerprint):
+        if not _HEX64.fullmatch(fingerprint):
             raise DecoyError("invalid fingerprint")
         decoys = self._read()
         if name in decoys:

@@ -36,7 +36,7 @@ _PATH_RE = re.compile(r"^[\x21-\x7e]{1,2048}$")
 
 
 def is_valid_client_id(client_id: object) -> bool:
-    return isinstance(client_id, str) and bool(_CLIENT_ID_RE.match(client_id))
+    return isinstance(client_id, str) and bool(_CLIENT_ID_RE.fullmatch(client_id))
 
 
 def new_nonce() -> str:
@@ -60,20 +60,20 @@ def build_canonical_string(
     body: bytes,
 ) -> bytes:
     """Собрать каноническую строку. Любое некорректное поле -> SigningError."""
-    if not isinstance(client_id, str) or not _CLIENT_ID_RE.match(client_id):
+    if not isinstance(client_id, str) or not _CLIENT_ID_RE.fullmatch(client_id):
         raise SigningError("invalid client_id")
-    if not isinstance(cert_fingerprint, str) or not _FINGERPRINT_RE.match(
+    if not isinstance(cert_fingerprint, str) or not _FINGERPRINT_RE.fullmatch(
         cert_fingerprint
     ):
         raise SigningError("invalid cert_fingerprint")
     for name, value in (("epoch", epoch), ("timestamp", timestamp)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise SigningError(f"invalid {name}")
-    if not isinstance(nonce, str) or not _NONCE_RE.match(nonce):
+    if not isinstance(nonce, str) or not _NONCE_RE.fullmatch(nonce):
         raise SigningError("invalid nonce")
-    if not isinstance(method, str) or not _METHOD_RE.match(method):
+    if not isinstance(method, str) or not _METHOD_RE.fullmatch(method):
         raise SigningError("invalid method")
-    if not isinstance(path, str) or not _PATH_RE.match(path):
+    if not isinstance(path, str) or not _PATH_RE.fullmatch(path):
         raise SigningError("invalid path")
     if not isinstance(body, (bytes, bytearray)):
         raise SigningError("body must be bytes")
@@ -101,7 +101,7 @@ def sign(key: bytes, canonical: bytes) -> str:
 
 def verify(key: bytes, canonical: bytes, signature_hex: str) -> bool:
     """Проверка подписи за постоянное время. Некорректный формат -> False."""
-    if not isinstance(signature_hex, str) or not _SIG_RE.match(signature_hex):
+    if not isinstance(signature_hex, str) or not _SIG_RE.fullmatch(signature_hex):
         return False
     expected = sign(key, canonical)
     return hmac.compare_digest(expected, signature_hex)

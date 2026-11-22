@@ -91,11 +91,13 @@ def test_token_in_body_blocked_plain_and_escaped():
         assert prov().filter_response(_json(body)) is None
 
 
-def test_foreign_full_token_pattern_blocked():
+def test_foreign_token_shape_is_not_blocked():
+    # Токеноподобная строка в чужом сообщении не должна блокировать getUpdates (H1 аудита 0.3.2).
     other = "987654321:BBH-otherOTHERotherOTHERotherOTHER99"
-    assert prov().filter_response(_json(f'{{"text":"{other}"}}'.encode())) is None
+    body = _json(f'{{"text":"{other}"}}'.encode())
+    assert prov().filter_response(body) is body
     plain = UpstreamResponse(200, "text/plain", other.encode())
-    assert prov().filter_response(plain) is None
+    assert prov().filter_response(plain) is plain
 
 
 def test_non_json_body_with_json_content_type_checked_raw():

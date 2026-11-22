@@ -94,7 +94,7 @@ def _validate_request(ev: h11.Request, limits: HttpLimits) -> tuple[str, str, di
         target = ev.target.decode("ascii")
     except UnicodeDecodeError as exc:
         raise HttpError(400, "non_ascii_request_line") from exc
-    if not _METHOD_RE.match(method):
+    if not _METHOD_RE.fullmatch(method):
         raise HttpError(400, "bad_method")
     if not target.startswith("/") or target.startswith("//") or len(target) > limits.max_target:
         raise HttpError(400, "bad_target")

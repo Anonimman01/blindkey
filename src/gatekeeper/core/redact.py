@@ -21,8 +21,11 @@ _PATTERNS = [
     # /bot<token>/ в URL
     re.compile(r"(?<=/bot)[^/\s?]+"),
     # PEM-блоки приватных ключей
+    # Тело блока не может содержать «-----»: поиск конца останавливается на следующем маркере,
+    # поэтому текст из множества «BEGIN» без «END» разбирается за линейное время.
     re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL
+        r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:(?!-----).){0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY-----",
+        re.DOTALL,
     ),
     # Authorization: Bearer xxx
     re.compile(r"(?i)(?<=bearer )[A-Za-z0-9._~+/=-]{8,}"),

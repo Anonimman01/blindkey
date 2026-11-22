@@ -64,10 +64,11 @@ def test_filter_blocks_exact_token():
     assert _p().filter_response(resp) is None
 
 
-def test_filter_blocks_foreign_token_shape():
+def test_filter_passes_foreign_token_shape():
+    # Чужая токеноподобная строка не секрет шлюза: ответ не блокируется (раньше блокировался).
     other = "ghp_" + "Z9y8X7w6V5" * 4
     resp = UpstreamResponse(200, "text/plain", other.encode())
-    assert _p().filter_response(resp) is None
+    assert _p().filter_response(resp) is resp
 
 
 def test_filter_blocks_json_escaped_token():

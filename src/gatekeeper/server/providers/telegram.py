@@ -18,10 +18,10 @@ from gatekeeper.server.providers.base import (
 
 _TOKEN_RE = re.compile(r"^[0-9]{3,12}:[A-Za-z0-9_-]{8,128}$")
 _FILE_PATH_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_./-]{0,199}$")
-# Полный токен Telegram по шаблону: ловит и чужие токены, и токен в искажённом виде.
-# Остальные шаблоны redact (/bot..., Bearer, PEM) нужны только для журнала: в ответах
-# они давали ложные срабатывания (/bothelp, «Bearer authentication»).
-_FULL_TOKEN_RE = re.compile(r"\d+:[A-Za-z0-9_-]{30,}")
+# Ответ блокируется только по точным значениям секрета (known_secrets). Общий шаблон токена
+# здесь не используется: чужое сообщение с токеноподобной строкой не должно блокировать
+# getUpdates навсегда (offset не сдвигается), а шаблон без якоря давал квадратичное время.
+# Шаблоны нужны только для маскирования журнала (core/redact.py).
 # Глубина вложенности JSON-ответа: ответы Bot API неглубокие. Лимит явный, чтобы блокировка
 # не зависела от recursion limit и версии интерпретатора (в 3.14 json.loads не падает на 100000).
 MAX_JSON_DEPTH = 64
@@ -51,7 +51,7 @@ class TelegramProvider(Provider):
     name = "telegram"
 
     def __init__(self, token: str, host: str = "api.telegram.org", port: int = 443) -> None:
-        if not isinstance(token, str) or not _TOKEN_RE.match(token):
+        if not isinstance(token, str) or not _TOKEN_RE.fullmatch(token):
             raise ProviderError("invalid bot token format")
         self._token = token
         self._token_secret_part = token.split(":", 1)[1]
@@ -77,7 +77,7 @@ class TelegramProvider(Provider):
                 file_path = json.loads(body.decode("utf-8"))["file_path"]
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 raise ProviderError("downloadFile needs JSON {file_path}") from exc
-            if (not isinstance(file_path, str) or not _FILE_PATH_RE.match(file_path)
+            if (not isinstance(file_path, str) or not _FILE_PATH_RE.fullmatch(file_path)
                     or ".." in file_path or "//" in file_path):
                 raise ProviderError("invalid file_path")
             return UpstreamRequest("GET", f"/file/bot{self._token}/{file_path}",
@@ -105,12 +105,10 @@ class TelegramProvider(Provider):
         return poll + POLL_MARGIN
 
     def _leaks(self, text: str) -> bool:
-        if any(secret in text for secret in self.known_secrets()):
-            return True
-        return _FULL_TOKEN_RE.search(text) is not None
+        return any(secret in text for secret in self.known_secrets())
 
     def filter_response(self, resp: UpstreamResponse) -> UpstreamResponse | None:
-        """None = ответ блокируется. Блок только по точным секретам и полному шаблону токена."""
+        """None = ответ блокируется. Блок только по точным значениям секрета."""
         for secret in self.known_secrets():
             if secret.encode("ascii") in resp.body:
                 return None

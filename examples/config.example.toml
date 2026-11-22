@@ -16,7 +16,7 @@ secret_env = "GATEKEEPER_UPSTREAM_TOKEN"
 # Только для тестов с поддельным API:
 # upstream_host = "127.0.0.1"
 # upstream_port = 9999
-# upstream_tls = false
+# upstream_tls = false   # разрешено только вместе с upstream_host на loopback (127.0.0.1, ::1, localhost)
 
 [limits]
 max_connections = 100       # всего одновременных соединений

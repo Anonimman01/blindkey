@@ -20,9 +20,6 @@ from gatekeeper.server.providers.telegram import MAX_JSON_DEPTH, _json_too_deep
 
 # Классический (ghp_, gho_, ghu_, ghs_, ghr_) и fine-grained (github_pat_) токены.
 _TOKEN_RE = re.compile(r"^(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})$")
-# Тот же шаблон без привязки к краям: ловит и чужие токены в ответе.
-_ANY_TOKEN_RE = re.compile(r"gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255}")
-
 # api_name -> (HTTP-метод, путь upstream). Только то, что явно перечислено.
 _ROUTES: dict[str, tuple[str, str]] = {
     "getUser": ("GET", "/user"),
@@ -36,7 +33,7 @@ class GitHubProvider(Provider):
     name = "github"
 
     def __init__(self, token: str, host: str = "api.github.com", port: int = 443) -> None:
-        if not isinstance(token, str) or not _TOKEN_RE.match(token):
+        if not isinstance(token, str) or not _TOKEN_RE.fullmatch(token):
             raise ProviderError("invalid github token format")
         self._token = token
         self.host = host
@@ -63,7 +60,7 @@ class GitHubProvider(Provider):
         return UpstreamRequest(method, path, headers)
 
     def _leaks(self, text: str) -> bool:
-        return self._token in text or _ANY_TOKEN_RE.search(text) is not None
+        return self._token in text
 
     def filter_response(self, resp: UpstreamResponse) -> UpstreamResponse | None:
         """None = ответ блокируется (fail closed). Логика та же, что у Telegram."""

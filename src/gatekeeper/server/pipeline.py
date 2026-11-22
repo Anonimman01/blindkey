@@ -33,6 +33,8 @@ from gatekeeper.server.upstream import Upstream, UpstreamError
 from gatekeeper.store.approvals import Approvals, make_preview
 
 _H = {k: getattr(constants, f"HEADER_{k.upper()}").lower() for k in ("client", "epoch", "time", "nonce", "sig")}
+# Сколько байт тела берётся для предпросмотра подтверждения (показывается ~200 символов).
+_PREVIEW_SOURCE_BYTES = 2048
 _PASSTHROUGH = frozenset({400, 401, 403, 404, 409, 429, 500, 502, 503})
 
 
@@ -95,6 +97,12 @@ class Pipeline:
                         {"client": client, "auto": True, "trigger": getattr(etype, "value", str(etype)),
                          "count": count, "window": anomalies.window, "ip": ip}, Severity.ALERT)
 
+    def _needs_confirm(self, api_name: str) -> bool:
+        """Сравнение без учёта регистра: Telegram принимает имена методов в любом регистре,
+        поэтому правило `POST:sendmessage` не должно обходить `[confirm] apis = ["sendMessage"]`."""
+        name = api_name.casefold()
+        return any(name == a.casefold() for a in self.confirm_apis)
+
     async def _confirm(self, cid: str, decision, req: ParsedRequest, ip: str) -> tuple[str | None, bytes | None]:
         """Опасный метод: (id подтверждения, None) если подтверждён, иначе (None, ответ-отказ).
 
@@ -105,7 +113,8 @@ class Pipeline:
         if approvals is None:  # вызывается только при включённых подтверждениях
             raise RuntimeError("approvals are not configured")
         api = decision.api_name
-        text = req.body.decode("utf-8", "replace")
+        # Предпросмотр короткий: маскируем только начало тела, а не весь мегабайт.
+        text = req.body[:_PREVIEW_SOURCE_BYTES].decode("utf-8", "replace")
         preview = make_preview(redact_text(text, self.provider.known_secrets()))
         res = await asyncio.to_thread(
             approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip)
@@ -175,7 +184,7 @@ class Pipeline:
             return await self._deny(EventType.DENY_RATE_LIMIT, 429, "rate", ip, cid,
                                     retry_after=self.client_limiter.retry_after(cid))
         confirmed = None
-        if self.approvals is not None and decision.api_name in self.confirm_apis:
+        if self.approvals is not None and self._needs_confirm(decision.api_name):
             confirmed, refusal = await self._confirm(cid, decision, req, ip)
             if refusal is not None:
                 return refusal
@@ -199,7 +208,8 @@ class Pipeline:
             await self._log("upstream_error", {"reason": str(exc), "client": cid, "api": api, "ip": ip},
                             Severity.WARNING)
             return neutral_response(502)
-        safe = self.provider.filter_response(up_resp)
+        # фильтр разбирает тело до нескольких МБ: не в потоке event loop
+        safe = await asyncio.to_thread(self.provider.filter_response, up_resp)
         if safe is None:
             await self._log(EventType.RESPONSE_SECRET_BLOCKED,
                             {"client": cid, "api": api, "ip": ip}, Severity.ALERT)

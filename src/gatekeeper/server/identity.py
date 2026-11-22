@@ -54,7 +54,7 @@ def _parse_entry(client_id: str, e: object) -> ClientRecord | None:
         fp, status, exp = e["fingerprint"], e["status"], e["expires"]
         master = bytes.fromhex(e["master_secret"])
         policy = Policy.from_strings(e["allow"])
-        if (not is_valid_client_id(client_id) or not _HEX64.match(fp)
+        if (not is_valid_client_id(client_id) or not _HEX64.fullmatch(fp)
                 or len(master) != constants.MASTER_SECRET_LEN or status not in STATUSES
                 or isinstance(exp, bool) or not isinstance(exp, int)):
             return None

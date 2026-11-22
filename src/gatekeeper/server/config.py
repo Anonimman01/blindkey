@@ -1,6 +1,7 @@
 """Конфигурация шлюза из config.toml (tomllib). Неизвестные ключи = ошибка (опечатки опасны)."""
 from __future__ import annotations
 
+import ipaddress
 import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -11,6 +12,17 @@ from gatekeeper.server.policy import is_valid_api_name
 
 class ConfigError(GatekeeperError):
     """Ошибка конфигурации."""
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if host is None:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -125,6 +137,9 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError("invalid rate_per_sec or decoy_ban_seconds")
     if cfg.autofreeze_threshold < 0 or cfg.autofreeze_window <= 0:
         raise ConfigError("autofreeze_threshold must be >= 0 and autofreeze_window > 0")
+    if not cfg.upstream_tls and not _is_loopback_host(cfg.upstream_host):
+        # без TLS токен ушёл бы по сети открытым текстом; для тестов хватает loopback
+        raise ConfigError("upstream_tls=false is allowed only with a loopback upstream_host")
     if not all(is_valid_api_name(a) for a in cfg.confirm_apis):
         raise ConfigError("[confirm] apis: invalid api name")
     if not 1 <= cfg.confirm_ttl <= 86400:

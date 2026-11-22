@@ -5,13 +5,14 @@ import asyncio
 import contextlib
 import os
 import ssl
+import stat
 
 from gatekeeper.core.events import EventType
 from gatekeeper.pki import ca as pki_ca
 from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink
-from gatekeeper.server.config import Config
+from gatekeeper.server.config import Config, ConfigError
 from gatekeeper.server.honey.decoys import DecoyStore
 from gatekeeper.server.http_io import HttpError, HttpLimits, read_request
 from gatekeeper.server.http_response import build_response, neutral_response
@@ -36,6 +37,19 @@ from gatekeeper.store.secrets import load_secret
 
 _CONN_DEADLINE = 120.0  # потолок на всё соединение
 _HANDSHAKE_TIMEOUT = 10.0
+
+
+def _unlink_if_socket(path: str) -> bool:
+    """Удаляет путь, только если это Unix-сокет. False = путь занят не сокетом (не трогаем)."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISSOCK(mode):
+        return False
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+    return True
 
 
 class GatekeeperApp:
@@ -126,7 +140,7 @@ class GatekeeperApp:
                 if ops is not None:
                     ops.close()
                     with contextlib.suppress(OSError):
-                        os.unlink(self.metrics_socket)  # type: ignore[arg-type]
+                        _unlink_if_socket(self.metrics_socket)  # type: ignore[arg-type]
                 await self._cancel_conn_tasks()
 
     def _gauges(self) -> dict[str, float]:
@@ -138,8 +152,8 @@ class GatekeeperApp:
         """Служебный Unix-сокет: GET /healthz и GET /metrics. Не на публичном порту."""
         if not self.metrics_socket or os.name == "nt" or self.metrics is None:
             return None
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self.metrics_socket)
+        if not _unlink_if_socket(self.metrics_socket):
+            raise ConfigError(f"metrics_socket path exists and is not a socket: {self.metrics_socket}")
         old = os.umask(0o177)  # сокет создаётся сразу с правами 0600
         try:
             return await asyncio.start_unix_server(self._on_ops, self.metrics_socket)  # type: ignore[attr-defined,unused-ignore]
