@@ -91,7 +91,7 @@ def test_group_commit_keeps_chain_valid_under_threads(tmp_path):
         try:
             for i in range(per):
                 chain.append("request_ok", {"t": tid, "i": i})
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             errors.append(exc)
 
     ts = [threading.Thread(target=work, args=(i,)) for i in range(n_threads)]

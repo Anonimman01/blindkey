@@ -13,7 +13,7 @@ _SAFE_STATUSES = frozenset({400, 403, 404, 408, 413, 429, 431, 500, 502, 503})
 
 
 def _check(text: str) -> str:
-    if not isinstance(text, str) or any(ord(c) < 0x20 and c != "\t" or ord(c) >= 0x7F for c in text):
+    if not isinstance(text, str) or any((ord(c) < 0x20 and c != "\t") or ord(c) >= 0x7F for c in text):
         raise ValueError("invalid header text")
     return text
 

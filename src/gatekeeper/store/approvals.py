@@ -15,7 +15,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,10 +107,8 @@ class Approvals:
             try:
                 yield
             finally:
-                try:
+                with suppress(OSError):
                     _unlock(fd)
-                except OSError:
-                    pass
         finally:
             os.close(fd)
 

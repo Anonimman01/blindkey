@@ -26,3 +26,7 @@ chain.head
 # Р»РѕРєР°Р»СЊРЅС‹Рµ РїСЂРѕРІРµСЂРѕС‡РЅС‹Рµ СЃРєСЂРёРїС‚С‹
 check_gw.py
 HANDOFF.md
+
+# покрытие тестов
+.coverage
+htmlcov/

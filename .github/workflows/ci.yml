@@ -9,14 +9,39 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install ruff mypy
+          python -m pip install --no-deps -e .
+      - name: Ruff
+        run: python -m ruff check src tests
+      - name: Mypy
+        run: python -m mypy
+
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest]
         python: ["3.11", "3.12", "3.13", "3.14"]
-        include:
-          - {os: windows-latest, python: "3.13"}
+        exclude:
+          # Windows гоняем на крайних версиях: остальное покрывает ubuntu
+          - os: windows-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.12"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -27,45 +52,14 @@ jobs:
           allow-prereleases: true
           cache: pip
           cache-dependency-path: requirements.lock
-      - name: Install dependencies
+      - name: Install pinned dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-cov
-          python -m pip install -e .
-      - name: Tests
-        run: python -m pytest -q --cov=gatekeeper --cov-report=term-missing
-
-  lock:
-    # Проверяем, что requirements.lock (с хешами) всё ещё ставится на 3.14 (как раньше).
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-          allow-prereleases: true
-      - run: |
-          python -m pip install --upgrade pip
           python -m pip install --require-hashes -r requirements.lock
+          python -m pip install pytest pytest-cov
           python -m pip install --no-deps -e .
-          python -m pip install pytest
-          python -m pytest -q
-
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - run: python -m pip install -e . ruff mypy
-      - name: mypy (должен быть зелёным)
-        run: mypy src
-      - name: ruff (пока не блокирует: остались замечания в тестах)
-        continue-on-error: true
-        run: ruff check src tests
+      - name: Tests
+        run: python -m pytest -q --cov --cov-report=term-missing
 
   audit:
     runs-on: ubuntu-latest

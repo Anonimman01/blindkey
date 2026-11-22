@@ -80,7 +80,7 @@ def test_autofreeze_after_bad_signatures(tmp_path):
     assert status(reg) == "active"
     assert call(env, make_req(env.fp, key=bytes(32)))[0] == 403
     assert status(reg) == "frozen"
-    ev = [json.loads(l) for l in audit_text(env).splitlines() if "client_frozen" in l]
+    ev = [json.loads(line) for line in audit_text(env).splitlines() if "client_frozen" in line]
     assert len(ev) == 1
     # после заморозки даже корректный запрос не проходит, без перезапуска
     assert call(env, make_req(env.fp))[0] == 403 and not env.up.calls
@@ -90,7 +90,7 @@ def test_autofreeze_logged_as_alert_with_auto_flag(tmp_path):
     env = make_env(tmp_path)
     arm(env, tmp_path, threshold=1)
     call(env, make_req(env.fp, key=bytes(32)))
-    line = next(l for l in audit_text(env).splitlines() if "client_frozen" in l)
+    line = next(entry for entry in audit_text(env).splitlines() if "client_frozen" in entry)
     assert '"auto":true' in line.replace(" ", "") and "alert" in line
     assert "deny_bad_signature" in line
 

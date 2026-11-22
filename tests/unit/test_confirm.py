@@ -296,7 +296,7 @@ def cli(tmp_path):
     cakey = tmp_path / "off" / "ca.key"
     cakey.parent.mkdir()
     base = ["--config-dir", str(cfg), "--data-dir", str(data)]
-    assert main(base + ["init", "--host", "127.0.0.1", "--ca-key-out", str(cakey)]) == 0
+    assert main([*base, "init", "--host", "127.0.0.1", "--ca-key-out", str(cakey)]) == 0
     return base, data
 
 
@@ -306,13 +306,13 @@ def test_cli_pending_approve_reject_and_audit(cli, capsys):
     rid = req(st).id
     other = req(st, body=b"zzz").id
     capsys.readouterr()
-    assert main(base + ["pending"]) == 0
+    assert main([*base, "pending"]) == 0
     out = capsys.readouterr().out
     assert rid in out and "alice" in out and "POST:sendMessage" in out and "pending" in out
-    assert main(base + ["approve", "--id", rid[:8]]) == 0
-    assert main(base + ["reject", "--id", other]) == 0
-    assert main(base + ["approve", "--id", rid]) == 1       # уже подтверждена
-    assert main(base + ["reject", "--id", "ffffffffffff"]) == 1
+    assert main([*base, "approve", "--id", rid[:8]]) == 0
+    assert main([*base, "reject", "--id", other]) == 0
+    assert main([*base, "approve", "--id", rid]) == 1       # уже подтверждена
+    assert main([*base, "reject", "--id", "ffffffffffff"]) == 1
     assert req(st).state == "approved"
     log = (data / "audit" / "audit.log").read_text()
     assert "confirm_approved" in log and "confirm_rejected" in log
@@ -322,7 +322,7 @@ def test_cli_pending_approve_reject_and_audit(cli, capsys):
 def test_cli_pending_empty(cli, capsys):
     base, _ = cli
     capsys.readouterr()
-    assert main(base + ["pending"]) == 0
+    assert main([*base, "pending"]) == 0
     assert "no pending" in capsys.readouterr().out
 
 
@@ -331,5 +331,5 @@ def test_cli_pending_sanitizes_tampered_preview(cli, capsys):
     st = Approvals(data / "approvals.json", 300)
     st.request("alice", "POST", "sendMessage", b"x", "ok\x1b[2Jevil", "1.2.3.4")
     capsys.readouterr()
-    assert main(base + ["pending"]) == 0
+    assert main([*base, "pending"]) == 0
     assert "\x1b" not in capsys.readouterr().out

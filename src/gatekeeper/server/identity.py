@@ -46,6 +46,8 @@ class Identity:
 
 
 def _parse_entry(client_id: str, e: object) -> ClientRecord | None:
+    if not isinstance(e, dict):
+        return None
     try:
         if not isinstance(e, dict):
             return None

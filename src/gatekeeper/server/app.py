@@ -107,10 +107,8 @@ class GatekeeperApp:
             if acquired:
                 self.limiter.release(ip)
             writer.close()
-            try:
+            with contextlib.suppress(Exception):
                 await writer.wait_closed()
-            except Exception:
-                pass
 
     async def serve(self, on_started=None) -> None:
         """on_started вызывается только после того, как порт реально занят."""
@@ -144,7 +142,7 @@ class GatekeeperApp:
             os.unlink(self.metrics_socket)
         old = os.umask(0o177)  # сокет создаётся сразу с правами 0600
         try:
-            return await asyncio.start_unix_server(self._on_ops, self.metrics_socket)
+            return await asyncio.start_unix_server(self._on_ops, self.metrics_socket)  # type: ignore[attr-defined,unused-ignore]
         finally:
             os.umask(old)
 

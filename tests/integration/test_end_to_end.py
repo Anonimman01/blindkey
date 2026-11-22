@@ -77,9 +77,9 @@ def gw(tmp_path, monkeypatch):
     cakey, bundle, decoy = tmp_path / "off" / "ca.key", tmp_path / "alice", tmp_path / "decoy"
     cakey.parent.mkdir()
     base = ["--config-dir", str(cfgd), "--data-dir", str(datad)]
-    assert main(base + ["init", "--host", "127.0.0.1", "--ca-key-out", str(cakey)]) == 0
+    assert main([*base, "init", "--host", "127.0.0.1", "--ca-key-out", str(cakey)]) == 0
     allow = [x for a in ALLOW for x in ("--allow", a)]
-    assert main(base + ["add-client", "--id", "alice", "--ca-key", str(cakey), "--out", str(bundle)] + allow) == 0
+    assert main([*base, "add-client", "--id", "alice", "--ca-key", str(cakey), "--out", str(bundle), *allow]) == 0
     port = free_port()
     (cfgd / "config.toml").write_text(
         f'[server]\nlisten_host="127.0.0.1"\nlisten_port={port}\n'
@@ -101,10 +101,12 @@ def api(gw, bundle=None):
 def attempt(gw, ctx):
     """'refused', если шлюз оборвал соединение или TLS; иначе полученные байты."""
     try:
-        with socket.create_connection(("127.0.0.1", gw.port), timeout=5) as raw:
-            with ctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
-                tls.sendall(b"GET /getMe HTTP/1.1\r\nHost: x\r\n\r\n")
-                data = tls.recv(200)
+        with (
+            socket.create_connection(("127.0.0.1", gw.port), timeout=5) as raw,
+            ctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls,
+        ):
+            tls.sendall(b"GET /getMe HTTP/1.1\r\nHost: x\r\n\r\n")
+            data = tls.recv(200)
     except OSError:
         return "refused"
     return data or "refused"
@@ -133,7 +135,7 @@ def test_get_me_send_message_and_files(gw):
 def test_get_updates_long_poll(gw):
     res = api(gw).get_updates(offset=5, timeout=1)["result"]
     assert res[0]["update_id"] == 10
-    method, path, body = gw.fake.requests[-1]
+    _method, path, body = gw.fake.requests[-1]
     assert path == f"/bot{TOKEN}/getUpdates"
     assert json.loads(body) == {"timeout": 1, "offset": 5}
 
@@ -177,8 +179,7 @@ def test_certificate_from_foreign_ca_refused(gw):
 
 
 def test_decoy_triggers_alarm_and_ban(gw):
-    assert main(gw.base + ["decoy-create", "--name", "old-backup", "--ca-key", str(gw.cakey),
-                           "--out", str(gw.decoy), "--hint", "test"]) == 0
+    assert main([*gw.base, "decoy-create", "--name", "old-backup", "--ca-key", str(gw.cakey), "--out", str(gw.decoy), "--hint", "test"]) == 0
     with pytest.raises(GatewayError) as e:
         api(gw, gw.decoy).get_me()
     assert e.value.status == 403
@@ -203,11 +204,11 @@ def _status(gw):
 def test_freeze_unfreeze_without_restart(gw):
     a = api(gw)
     assert a.get_me()["ok"]
-    assert main(gw.base + ["freeze", "--id", "alice"]) == 0
+    assert main([*gw.base, "freeze", "--id", "alice"]) == 0
     with pytest.raises(GatewayError) as e:
         a.get_me()
     assert e.value.status == 403
-    assert main(gw.base + ["unfreeze", "--id", "alice"]) == 0
+    assert main([*gw.base, "unfreeze", "--id", "alice"]) == 0
     assert a.get_me()["ok"]
     log = gw.layout.audit_log.read_text()
     assert "client_frozen" in log and "client_unfrozen" in log
@@ -216,19 +217,19 @@ def test_freeze_unfreeze_without_restart(gw):
 def test_revoke_denies_without_restart_and_is_final(gw):
     a = api(gw)
     assert a.get_me()["ok"]
-    assert main(gw.base + ["revoke", "--id", "alice"]) == 0
+    assert main([*gw.base, "revoke", "--id", "alice"]) == 0
     with pytest.raises(GatewayError) as e:
         a.get_me()
     assert e.value.status == 403
     assert _status(gw) == "revoked"
-    assert main(gw.base + ["unfreeze", "--id", "alice"]) == 1  # revoked необратим
+    assert main([*gw.base, "unfreeze", "--id", "alice"]) == 1  # revoked необратим
     assert _status(gw) == "revoked"
     assert "client_revoked" in gw.layout.audit_log.read_text()
 
 
 def test_renew_replaces_certificate_and_keeps_rights(gw):
     new = gw.tmp / "alice2"
-    assert main(gw.base + ["renew", "--id", "alice", "--ca-key", str(gw.cakey), "--out", str(new)]) == 0
+    assert main([*gw.base, "renew", "--id", "alice", "--ca-key", str(gw.cakey), "--out", str(new)]) == 0
     with pytest.raises(GatewayError) as e:  # старый пакет больше не работает
         api(gw).get_me()
     assert e.value.status == 403
@@ -239,12 +240,12 @@ def test_renew_replaces_certificate_and_keeps_rights(gw):
 
 
 def test_renew_refused_for_revoked_or_unknown(gw):
-    assert main(gw.base + ["revoke", "--id", "alice"]) == 0
+    assert main([*gw.base, "revoke", "--id", "alice"]) == 0
     for cid in ("alice", "nobody"):
         out = gw.tmp / f"out-{cid}"
-        assert main(gw.base + ["renew", "--id", cid, "--ca-key", str(gw.cakey), "--out", str(out)]) == 1
+        assert main([*gw.base, "renew", "--id", cid, "--ca-key", str(gw.cakey), "--out", str(out)]) == 1
         assert not out.exists()
-    assert main(gw.base + ["freeze", "--id", "nobody"]) == 1
+    assert main([*gw.base, "freeze", "--id", "nobody"]) == 1
 
 
 def test_autofreeze_over_real_mtls(gw):
@@ -269,7 +270,7 @@ def test_autofreeze_over_real_mtls(gw):
         server.stop()
     log = gw.layout.audit_log.read_text()
     assert '"auto":true' in log.replace(" ", "") and "client_frozen" in log
-    assert main(gw.base + ["unfreeze", "--id", "alice"]) == 0
+    assert main([*gw.base, "unfreeze", "--id", "alice"]) == 0
 
 
 def test_confirm_over_real_mtls(gw, capsys):
@@ -288,13 +289,13 @@ def test_confirm_over_real_mtls(gw, capsys):
             a.call("sendMessage", payload)
         assert e.value.status == 403                 # заявка создана, ответ нейтральный
         capsys.readouterr()
-        assert main(gw.base + ["pending"]) == 0
+        assert main([*gw.base, "pending"]) == 0
         out = capsys.readouterr().out
         rid = out.split()[0]
         assert "alice" in out and "sendMessage" in out and "dangerous" in out
         with pytest.raises(GatewayError):
             a.call("sendMessage", payload)           # без approve по-прежнему 403
-        assert main(gw.base + ["approve", "--id", rid]) == 0
+        assert main([*gw.base, "approve", "--id", rid]) == 0
         with pytest.raises(GatewayError):
             a.call("sendMessage", {"chat_id": 1, "text": "changed"})   # другое тело не проходит
         assert a.call("sendMessage", payload)["ok"]  # без перезапуска шлюза

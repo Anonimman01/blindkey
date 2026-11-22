@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from gatekeeper.core.errors import AuditError
@@ -31,7 +31,7 @@ def _try_lock(fd: int) -> None:
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined,unused-ignore]
     else:
         import fcntl
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined,unused-ignore]
 
 
 def _unlock(fd: int) -> None:
@@ -41,7 +41,7 @@ def _unlock(fd: int) -> None:
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined,unused-ignore]
     else:
         import fcntl
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[attr-defined,unused-ignore]
 
 
 class FileSink:
@@ -87,10 +87,8 @@ class FileSink:
         finally:
             if fd >= 0:
                 if got:
-                    try:
+                    with suppress(OSError):
                         _unlock(fd)
-                    except OSError:
-                        pass
                 os.close(fd)
 
     def size(self) -> int:

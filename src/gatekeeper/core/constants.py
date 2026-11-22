@@ -19,5 +19,8 @@ HEADER_TIME = "X-GK-Time"
 HEADER_NONCE = "X-GK-Nonce"
 HEADER_SIG = "X-GK-Sig"
 
+# Заголовок ответа: идентификатор запроса для сверки с журналом (в журнале — поле rid).
+HEADER_REQUEST_ID = "X-GK-Request-Id"
+
 # Допустимое расхождение часов клиента и шлюза, секунд.
 MAX_CLOCK_SKEW_SECONDS = 30

@@ -1,10 +1,10 @@
 """Типы событий безопасности: общий язык для журнала, аномалий и подтверждений."""
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     # Запрос принят
     REQUEST_OK = "request_ok"
     # Отказы (причина только в журнале, клиенту ответ нейтральный)
@@ -32,7 +32,7 @@ class EventType(str, Enum):
     SERVER_STARTED = "server_started"
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     INFO = "info"
     WARNING = "warning"
     ALERT = "alert"

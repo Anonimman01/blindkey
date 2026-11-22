@@ -60,9 +60,8 @@ def test_renew_rejects_revoked_unknown_and_duplicate_fingerprint(reg):
 
 
 def test_lock_timeout(reg):
-    with reg._locked(), pytest.raises(RegistryError, match="lock timeout"):
-        with reg._locked(timeout=0.05):
-            pass
+    with reg._locked(), pytest.raises(RegistryError, match="lock timeout"), reg._locked(timeout=0.05):
+        pass
 
 
 def test_concurrent_adds_do_not_lose_updates(reg):
@@ -73,7 +72,7 @@ def test_concurrent_adds_do_not_lose_updates(reg):
     def worker(i):
         try:
             reg.add(f"c{i}", entry(fp=f"{i:064x}"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(i + 1,)) for i in range(8)]

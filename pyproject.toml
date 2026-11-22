@@ -11,6 +11,15 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Anonimman01"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
 keywords = ["telegram", "bot", "gateway", "mtls", "security", "audit"]
 dependencies = ["cryptography>=42", "h11>=0.14"]
 
@@ -23,7 +32,7 @@ Changelog = "https://github.com/Anonimman01/blindkey/blob/main/CHANGELOG.md"
 gatekeeper = "gatekeeper.cli.main:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "ruff", "mypy", "pip-audit"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.9", "mypy>=1.13", "pip-audit"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -31,10 +40,34 @@ where = ["src"]
 [tool.setuptools.package-data]
 gatekeeper = ["py.typed"]
 
-[tool.mypy]
-files = ["src"]
-python_version = "3.11"
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["gatekeeper"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RUF"]
+ignore = [
+    "E501",   # длину строк держит ревью, а не линтер
+    "RUF001", # кириллица в строках и комментариях: норма этого проекта
+    "RUF002",
+    "RUF003",
+]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true

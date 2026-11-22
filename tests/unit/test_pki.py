@@ -121,7 +121,7 @@ def test_validate_ok(authority):
 
 
 def test_validate_foreign_ca(authority):
-    ca, key = authority
+    ca, _key = authority
     other_ca, other_key = pki.create_ca("evil CA")
     cert, _ = pki.issue_client_cert(other_ca, other_key, "bot-1")
     assert not pki.validate_client_cert(cert, ca)

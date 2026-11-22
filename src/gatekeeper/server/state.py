@@ -66,7 +66,7 @@ class StateStore:
 
     # --- бюджет ---
     def load_budget(self, day: int) -> dict[str, int]:
-        return {c: u for c, u in self._all("SELECT client, used FROM budget WHERE day = ?", (day,))}
+        return dict(self._all("SELECT client, used FROM budget WHERE day = ?", (day,)))
 
     def set_budget(self, client: str, day: int, used: int) -> None:
         self._exec("INSERT OR REPLACE INTO budget VALUES (?,?,?)", (client, day, used))
@@ -76,7 +76,7 @@ class StateStore:
 
     # --- баны по IP ---
     def load_bans(self, now: int) -> dict[str, int]:
-        return {ip: u for ip, u in self._all("SELECT ip, until FROM bans WHERE until > ?", (now,))}
+        return dict(self._all("SELECT ip, until FROM bans WHERE until > ?", (now,)))
 
     def set_ban(self, ip: str, until: int) -> None:
         self._exec("INSERT OR REPLACE INTO bans VALUES (?,?)", (ip, until))

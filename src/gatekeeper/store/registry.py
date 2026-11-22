@@ -11,7 +11,7 @@ import json
 import os
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from gatekeeper.core.errors import GatekeeperError
@@ -77,10 +77,8 @@ class Registry:
             try:
                 yield
             finally:
-                try:
+                with suppress(OSError):
                     _unlock(fd)
-                except OSError:
-                    pass
         finally:
             os.close(fd)
 

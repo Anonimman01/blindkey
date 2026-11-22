@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import re
 from collections.abc import Iterable
 from typing import Any
@@ -37,10 +38,8 @@ def _known(secrets: Iterable[str | bytes] | None) -> list[str]:
     for s in secrets or ():
         if isinstance(s, (bytes, bytearray)):
             variants = [bytes(s).hex()]
-            try:
+            with contextlib.suppress(UnicodeDecodeError):
                 variants.append(bytes(s).decode("utf-8"))
-            except UnicodeDecodeError:
-                pass
         else:
             variants = [str(s)]
         out += [v for v in variants if len(v) >= _MIN_SECRET_LEN]

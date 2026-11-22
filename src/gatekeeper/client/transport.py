@@ -22,6 +22,9 @@ class Transport:
             headers += [("Content-Type", content_type or "application/json"),
                         ("Content-Length", str(len(body)))]
         headers += list(self.session.sign_headers(method, target, body).items())
-        with socket.create_connection((self.host, self.port), timeout=self.timeout if timeout is None else timeout) as raw:
-            with self._ctx.wrap_socket(raw, server_hostname=self.server_name) as tls:
-                return exchange(tls, method, target, headers, body)
+        timeout = self.timeout if timeout is None else timeout
+        with (
+            socket.create_connection((self.host, self.port), timeout=timeout) as raw,
+            self._ctx.wrap_socket(raw, server_hostname=self.server_name) as tls,
+        ):
+            return exchange(tls, method, target, headers, body)

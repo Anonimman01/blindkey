@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ssl
 
 import h11
@@ -77,7 +78,5 @@ class Upstream:
             return UpstreamResponse(status, ctype, b"".join(parts))
         finally:
             writer.close()
-            try:
+            with contextlib.suppress(Exception):
                 await writer.wait_closed()
-            except Exception:
-                pass

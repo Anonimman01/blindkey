@@ -3,23 +3,25 @@
 import socket
 import time
 
-from test_end_to_end import api, gw, tls_ctx  # noqa: F401  (gw: фикстура)
+from test_end_to_end import api, tls_ctx
 
 
 def raw(gw, payload: bytes, wait: float = 5.0) -> bytes:
     ctx = tls_ctx(gw, gw.bundle / "client.pem", gw.bundle / "client.key")
     chunks = []
-    with socket.create_connection(("127.0.0.1", gw.port), timeout=wait) as s:
-        with ctx.wrap_socket(s, server_hostname="127.0.0.1") as t:
-            t.sendall(payload)
-            try:
-                while True:
-                    d = t.recv(65536)
-                    if not d:
-                        break
-                    chunks.append(d)
-            except OSError:
-                pass
+    with (
+        socket.create_connection(("127.0.0.1", gw.port), timeout=wait) as s,
+        ctx.wrap_socket(s, server_hostname="127.0.0.1") as t,
+    ):
+        t.sendall(payload)
+        try:
+            while True:
+                d = t.recv(65536)
+                if not d:
+                    break
+                chunks.append(d)
+        except OSError:
+            pass
     return b"".join(chunks)
 
 

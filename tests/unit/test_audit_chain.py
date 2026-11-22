@@ -49,7 +49,7 @@ def test_append_and_verify(paths):
 
 def test_records_are_linked(paths):
     make_chain(paths, 3)
-    recs = [json.loads(l) for l in read_lines(paths[0])]
+    recs = [json.loads(line) for line in read_lines(paths[0])]
     assert recs[0]["prev"] == GENESIS_HASH
     assert recs[1]["prev"] == recs[0]["hash"]
     assert recs[2]["prev"] == recs[1]["hash"]
@@ -237,7 +237,7 @@ def test_two_chains_interleaved_stay_one_chain(paths):
         b.append(EventType.CLIENT_ADDED, {"w": "b", "i": i})
     res = verify_file(*paths)
     assert res.ok and res.count == 6 and res.head_checked
-    assert [json.loads(l)["seq"] for l in read_lines(paths[0])] == list(range(6))
+    assert [json.loads(line)["seq"] for line in read_lines(paths[0])] == list(range(6))
 
 
 def test_server_chain_survives_cli_write_in_between(paths):
@@ -287,7 +287,7 @@ def test_parallel_processes_keep_chain_valid(paths):
     assert all(p.wait(timeout=120) == 0 for p in procs)
     res = verify_file(log, head)
     assert res.ok and res.count == 100 and res.head_checked
-    recs = [json.loads(l) for l in read_lines(log)]
+    recs = [json.loads(line) for line in read_lines(log)]
     for k in range(4):  # у каждого процесса порядок его записей сохранён
         assert [r["data"]["i"] for r in recs if r["data"]["w"] == f"p{k}"] == list(range(25))
 
@@ -322,9 +322,8 @@ def test_append_refuses_forged_foreign_record(paths):
 def test_lock_is_exclusive_and_times_out(paths):
     holder, other = FileSink(*paths), FileSink(*paths)
     with holder.locked():
-        with pytest.raises(AuditError, match="timeout"):
-            with other.locked(timeout=0.1):
-                pass
+        with pytest.raises(AuditError, match="timeout"), other.locked(timeout=0.1):
+            pass
         with other.locked(required=False, timeout=0.1) as got:
             assert got is False  # чтение без замка допустимо
     with other.locked(timeout=1) as got:  # после снятия берётся

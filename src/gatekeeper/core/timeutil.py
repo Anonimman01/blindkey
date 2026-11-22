@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import time
+from email.utils import formatdate
 
 from gatekeeper.core import constants
 
 
 def unix_now() -> int:
     return int(time.time())
+
+
+def http_date(timestamp: int) -> str:
+    """Дата в формате HTTP (RFC 9110): 'Sun, 06 Nov 1994 08:49:37 GMT'."""
+    return formatdate(timestamp, usegmt=True)
 
 
 def is_fresh(

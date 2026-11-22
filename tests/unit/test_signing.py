@@ -20,16 +20,16 @@ FP = "ab" * 32
 NONCE = "0123456789abcdef0123456789abcdef"
 KEY = derive_signing_key(bytes(range(32)), 0)
 
-BASE = dict(
-    client_id="bot-1",
-    cert_fingerprint=FP,
-    epoch=0,
-    timestamp=1_700_000_000,
-    nonce=NONCE,
-    method="POST",
-    path="sendMessage",
-    body=b'{"chat_id":1,"text":"hi"}',
-)
+BASE = {
+    "client_id": "bot-1",
+    "cert_fingerprint": FP,
+    "epoch": 0,
+    "timestamp": 1_700_000_000,
+    "nonce": NONCE,
+    "method": "POST",
+    "path": "sendMessage",
+    "body": b'{"chat_id":1,"text":"hi"}',
+}
 
 
 def canon(**over):

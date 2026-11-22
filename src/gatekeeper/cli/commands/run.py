@@ -12,8 +12,9 @@ from gatekeeper.store.layout import Layout
 def run(args, layout: Layout) -> int:
     cfg = load_config(layout.config_file)
     app = build_app(layout, cfg)
-    started = lambda: output.info(
-        f"gatekeeper listening on {cfg.listen_host}:{cfg.listen_port} (mTLS, TLS 1.3)")
+    def started():
+        return output.info(
+            f"gatekeeper listening on {cfg.listen_host}:{cfg.listen_port} (mTLS, TLS 1.3)")
     try:
         asyncio.run(app.serve(on_started=started))
     except KeyboardInterrupt:

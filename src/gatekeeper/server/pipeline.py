@@ -9,6 +9,7 @@ nonce -> политика -> лимиты -> upstream -> фильтр ответ
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Callable
 
@@ -123,11 +124,9 @@ class Pipeline:
             try:
                 resp = await self._handle(req, ip, peer_der)
             except Exception as exc:  # fail closed; только тип ошибки, без текста
-                try:
+                with contextlib.suppress(Exception):
                     await self._log("internal_error", {"error": type(exc).__name__, "ip": ip},
                                     Severity.ALERT)
-                except Exception:
-                    pass
                 resp = neutral_response(500)
             if self.metrics is not None:
                 self.metrics.inc("gk_requests_total", status=resp[9:12].decode("ascii", "replace"))

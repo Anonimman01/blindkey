@@ -17,7 +17,7 @@ def env(tmp_path):
     cfg, data, cakey = tmp_path / "cfg", tmp_path / "data", tmp_path / "off" / "ca.key"
     cakey.parent.mkdir()
     base = ["--config-dir", str(cfg), "--data-dir", str(data)]
-    assert main(base + ["init", "--host", "127.0.0.1", "--host", "gw.example", "--ca-key-out", str(cakey)]) == 0
+    assert main([*base, "init", "--host", "127.0.0.1", "--host", "gw.example", "--ca-key-out", str(cakey)]) == 0
     return base, cfg, data, cakey, tmp_path
 
 
@@ -26,7 +26,7 @@ def mode(p):
 
 
 def test_init_layout_and_perms(env):
-    base, cfg, data, cakey, _ = env
+    _base, cfg, data, cakey, _ = env
     if sys.platform != "win32":
         assert mode(data) == 0o700 and mode(data / "pki") == 0o700 and mode(data / "audit") == 0o700
         assert mode(data / "pki" / "server.key") == 0o600 and mode(cakey) == 0o600
@@ -36,15 +36,14 @@ def test_init_layout_and_perms(env):
 
 
 def test_init_twice_refused(env):
-    base, _, _, cakey, tmp = env
-    assert main(base + ["init", "--host", "x", "--ca-key-out", str(tmp / "other.key")]) == 1
+    base, _, _, _cakey, tmp = env
+    assert main([*base, "init", "--host", "x", "--ca-key-out", str(tmp / "other.key")]) == 1
 
 
 def test_add_client_bundle_and_registry(env, capsys):
     base, cfg, data, cakey, tmp = env
     out = tmp / "bundle"
-    assert main(base + ["add-client", "--id", "bot-1", "--ca-key", str(cakey), "--out", str(out),
-                        "--allow", "POST:sendMessage"]) == 0
+    assert main([*base, "add-client", "--id", "bot-1", "--ca-key", str(cakey), "--out", str(out), "--allow", "POST:sendMessage"]) == 0
     cert = ca.load_cert_pem((out / "client.pem").read_bytes())
     ca_cert = ca.load_cert_pem((out / "ca.pem").read_bytes())
     assert ca.validate_client_cert(cert, ca_cert)
@@ -59,14 +58,15 @@ def test_add_client_bundle_and_registry(env, capsys):
     log = data / "audit" / "audit.log"
     assert verify_file(log).ok and master.encode() not in log.read_bytes()
     capsys.readouterr()
-    assert main(base + ["list-clients"]) == 0
+    assert main([*base, "list-clients"]) == 0
     listing = capsys.readouterr().out
     assert "bot-1" in listing and master not in listing
 
 
 def test_add_client_duplicate_and_invalid(env):
     base, _, _, cakey, tmp = env
-    args = lambda cid, out, *x: base + ["add-client", "--id", cid, "--ca-key", str(cakey), "--out", str(tmp / out), *x]
+    def args(cid, out, *x):
+        return [*base, "add-client", "--id", cid, "--ca-key", str(cakey), "--out", str(tmp / out), *x]
     assert main(args("a", "o1")) == 0
     assert main(args("a", "o2")) == 1            # повтор id
     assert main(args("..", "o3")) == 1           # плохой id
@@ -81,7 +81,7 @@ def test_add_client_wrong_ca_key(env):
     ca.write_private_file(bad, ca.key_to_pem(other))
     # ключ чужого CA: сертификат формально выпустится, но validate_client_cert его отвергнет
     out = tmp / "bundle"
-    main(base + ["add-client", "--id", "c", "--ca-key", str(bad), "--out", str(out)])
+    main([*base, "add-client", "--id", "c", "--ca-key", str(bad), "--out", str(out)])
     if out.exists():
         cert = ca.load_cert_pem((out / "client.pem").read_bytes())
         assert not ca.validate_client_cert(cert, ca.load_cert_pem((out / "ca.pem").read_bytes()))
@@ -89,10 +89,10 @@ def test_add_client_wrong_ca_key(env):
 
 def test_audit_verify_detects_tamper(env, capsys):
     base, _, data, _, _ = env
-    assert main(base + ["audit-verify"]) == 0
+    assert main([*base, "audit-verify"]) == 0
     log = data / "audit" / "audit.log"
     log.write_bytes(log.read_bytes().replace(b"init", b"hack"))
-    assert main(base + ["audit-verify"]) == 2
+    assert main([*base, "audit-verify"]) == 2
 
 
 def test_audit_masks_secret_values():
@@ -119,8 +119,8 @@ def test_client_id_rules_and_cn_limit():
 
 
 def test_status_reports_ok_and_detects_broken_journal(env):
-    base, cfg, data, cakey, _ = env
-    assert main(base + ["status"]) == 0
+    base, _cfg, data, _cakey, _ = env
+    assert main([*base, "status"]) == 0
     log = data / "audit" / "audit.log"
     log.write_bytes(log.read_bytes().replace(b'"type":"', b'"type":"x', 1))
-    assert main(base + ["status"]) == 2
+    assert main([*base, "status"]) == 2

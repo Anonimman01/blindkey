@@ -2,7 +2,7 @@
 import ssl
 from datetime import timedelta
 
-from test_end_to_end import attempt, gw, tls_ctx  # noqa: F401  (gw - фикстура)
+from test_end_to_end import attempt, tls_ctx
 
 from gatekeeper.pki import ca
 
@@ -62,7 +62,7 @@ def test_tls12_downgrade_refused(gw):
 
 def _events(gw, name):
     import json
-    return [json.loads(l) for l in gw.layout.audit_log.read_text().splitlines() if name in l]
+    return [json.loads(line) for line in gw.layout.audit_log.read_text().splitlines() if name in line]
 
 
 def test_failed_handshakes_are_audited_without_flooding(gw):
