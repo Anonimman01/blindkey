@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindkey"
-version = "0.3.8"
+version = "0.3.9a1"
 requires-python = ">=3.11"
-description = "mTLS-шлюз для Telegram, GitHub, OpenAI, Vercel и Cloudflare: токен только на шлюзе, подпись запросов, журнал с цепочкой хешей"
+description = "Self-hosted mTLS gateway that keeps API tokens (Telegram, GitHub, OpenAI, Vercel, Cloudflare) off bots, scripts and AI agents"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
