@@ -1,334 +1,114 @@
-# gatekeeper
+# BlindKey / gatekeeper: mTLS API-key gateway for bots, scripts and AI agents
 
-Лёгкий mTLS-шлюз для Telegram Bot API, GitHub, OpenAI, Vercel и Cloudflare. Настоящий токен хранится только на шлюзе,
-клиенты (боты, скрипты, агенты) получают отзываемые сертификаты с белым списком методов. Шлюз
-проверяет подпись каждого запроса, ведёт журнал с цепочкой хешей и ловит использование приманок.
+**Language:** English · [Русский](README.ru.md)
 
-Репозиторий называется blindkey, пакет и команда `gatekeeper`. Версия 0.3.8, лицензия Apache-2.0.
-Независимого аудита нет, см. [SECURITY.md](SECURITY.md) и [docs/threat-model.md](docs/threat-model.md).
-Один экземпляр шлюза может обслуживать несколько провайдеров (`[providers.<имя>]`, см. ниже); каждый клиент привязан к одному из них.
+[![CI](https://github.com/Anonimman01/blindkey/actions/workflows/ci.yml/badge.svg)](https://github.com/Anonimman01/blindkey/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Anonimman01/blindkey/actions/workflows/codeql.yml/badge.svg)](https://github.com/Anonimman01/blindkey/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)
 
-## Установка
+**BlindKey** (PyPI: `blindkey`, command: `gatekeeper` or `blindkey`) is a small self-hosted Python gateway that sits in
+front of third-party APIs and keeps your **real API token off the machines that use it**. Your bot,
+script or AI agent never sees the Telegram, GitHub, OpenAI, Vercel or Cloudflare token. It gets a
+revocable client certificate and an allowlist of API methods instead. If the client is compromised,
+you revoke one certificate. The token is not leaked, and does not need to be rotated.
 
-Linux и macOS:
+Typical uses: a **Telegram bot token proxy**, an **OpenAI API key proxy for AI agents**, a
+**secretless credential gateway** for CI jobs and scripts, per-client allowlists for the GitHub API.
 
+## How it works
+
+```
+ bot / script / AI agent                 gatekeeper (your server)                 upstream API
+ -----------------------                 ------------------------                 ------------
+ client certificate (mTLS)  ──TLS 1.3──▶ verify cert + HMAC signature
+ signed request, no token                check allowlist, rate limit, budget
+                                         [dangerous method? wait for operator]
+                                         add the real token  ───────────────────▶ api.telegram.org
+                                         filter response for token leaks  ◀─────── api.github.com ...
+ response                      ◀──────── write hash-chained audit log
+```
+
+## Features
+
+- **mTLS (TLS 1.3 only)** with your own CA: each client gets a revocable certificate.
+- **HMAC-SHA256 request signing** bound to the certificate fingerprint, with replay protection
+  (nonce cache and a ±30 s time window).
+- **Per-client allowlist** of `METHOD:api` rules. The upstream path comes from the rule, never from
+  the client request, so there is no SSRF through the gateway.
+- **Response filter**: a response that contains the gateway's token is blocked (502) and logged.
+  Compressed responses and duplicate-key JSON tricks are rejected rather than inspected.
+- **Hash-chained audit log** with size-based rotation, truncated-tail recovery and external
+  anchors (`audit-anchor`, `audit-verify`).
+- **Decoys (honeytokens)**: a client that uses a decoy credential is caught and its IP banned.
+- **Operator confirmation** for dangerous methods (`[confirm]`): the request waits until an
+  operator runs `gatekeeper approve`.
+- **Rate limits, daily request budget, anomaly counters and auto-freeze** of misbehaving clients.
+- **Several providers on one gateway**: Telegram Bot API, GitHub, OpenAI, Vercel, Cloudflare.
+  Each client is bound to one provider.
+- Small footprint: Python 3.11+, two runtime dependencies (`cryptography`, `h11`),
+  hash-pinned lock files, Apache-2.0.
+
+## Supported providers
+
+| Provider | Typical use |
+|---|---|
+| Telegram Bot API | keep the bot token off the bot host and off the app that talks to Telegram |
+| GitHub | give scripts and agents a narrow slice of the GitHub API |
+| OpenAI | keep the OpenAI API key away from agents and per-project runtimes |
+| Vercel | limited access to selected Vercel API calls |
+| Cloudflare | limited access to selected Cloudflare API calls |
+
+## Quick start (Linux)
+
+    pip install blindkey
+
+The PyPI distribution is called `blindkey`. The command is `gatekeeper` (alias: `blindkey`) and the
+Python package is `gatekeeper`. Do **not** run `pip install gatekeeper`: that name on PyPI belongs
+to a different project. To work from a checkout with hash-pinned dependencies:
+
+    git clone https://github.com/Anonimman01/blindkey
+    cd blindkey
     python -m venv .venv && source .venv/bin/activate
     pip install --require-hashes -r requirements.lock
-    pip install --require-hashes -r requirements-dev.lock
     pip install --no-deps -e .
-    python -m pytest
 
-Lockfiles собраны `pip-compile --generate-hashes` и проверяются в CI
-(`scripts/check_lock.py`): дрейф между `requirements*.in` и lock ломает сборку. Обновить оба lock:
-
-    scripts/update_lock.sh
-
-Windows (PowerShell) годится для разработки:
-
-    python -m venv .venv
-    .\.venv\Scripts\Activate.ps1
-    pip install -e ".[dev]"
-    python -m pytest -q; python -m ruff check src tests; python -m mypy
-
-## Запуск на сервере (Linux)
-
-Боевой запуск только на Linux: на Windows права 0600/0700 не применяются, годится для разработки.
+Create the CA and the gateway certificate, add a client, start the gateway:
 
     useradd --system --create-home gatekeeper && su - gatekeeper
     export GATEKEEPER_CONFIG_DIR=$HOME/etc GATEKEEPER_DATA_DIR=$HOME/data
 
-    # 1. CA и сертификат шлюза. --host: адреса, по которым к шлюзу ходят клиенты.
     gatekeeper init --host 203.0.113.10 --host gw.example.com --ca-key-out /safe/ca.key
-    #    ca.key унесите офлайн: на шлюзе он не нужен. init можно повторять: недостающие
-    #    файлы он создаст, существующие не тронет.
-    #    Шифрование ca.key (PKCS8) — фразой из файла 0400:
-    # gatekeeper init ... --ca-key-pass-file /safe/ca.pass
-    #    Та же опция есть у add-client, renew, decoy-create и renew-server.
-
-    # 2. Клиент: пакет появится в --out, права только из --allow.
     gatekeeper add-client --id mybot --ca-key /safe/ca.key --out ./mybot-bundle \
-        --allow GET:getMe --allow POST:sendMessage --allow POST:getFile --allow POST:downloadFile
-    #    Передайте mybot-bundle на машину бота безопасным каналом. client.key и master.secret секретны.
+        --allow GET:getMe --allow POST:sendMessage
+    export GATEKEEPER_UPSTREAM_TOKEN='123456:ABC...'
+    gatekeeper run
 
-    # 3. Токен бота и запуск.
-    export GATEKEEPER_UPSTREAM_TOKEN='123456:ABC...'    # или secret_file в config.toml (0400)
-    gatekeeper run                                      # настройки: examples/config.example.toml
+Copy `mybot-bundle` to the bot's machine over a secure channel. `client.key` and `master.secret`
+are secrets. A client example is in [examples/client_send_message.py](examples/client_send_message.py),
+and all settings are in [examples/config.example.toml](examples/config.example.toml).
 
-Правила `--allow` проверяются тем же разбором, что и на шлюзе: метод только `GET` или `POST`, имя API
-`[A-Za-z][A-Za-z0-9_]{0,63}`. `clients.json` хранит `master_secret` открытым текстом, поэтому шлюз
-не запустится, если файл доступен группе или остальным (нужно `chmod 600`) или принадлежит
-другому пользователю; то же показывает `gatekeeper status`.
+Production use is Linux only (file permissions 0600/0700 are enforced there). Windows works for
+development. The full operator guide is currently in Russian: [README.ru.md](README.ru.md).
 
-Long polling (Telegram): добавьте клиенту `--allow POST:getUpdates` (Telegram допускает одного потребителя
-getUpdates на бота, выдавайте правило одному клиенту) и вызывайте `BotApi.get_updates(offset, timeout=30)`.
-Шлюз держит запрос к Telegram `timeout` секунд (не больше 50) плюс 10 с запаса; каждый вызов тратит
-дневной бюджет и лимит частоты клиента. Очереди на стороне шлюза: v2.
+## Status and security
 
-Состояние и наблюдаемость: `gatekeeper status` показывает клиентов, срок серверного сертификата
-(с предупреждением за 30 дней) и проверку журнала (код 2, если цепочка сломана). Каждый ответ шлюза несёт `X-Request-Id`, тот же `rid` стоит в записи журнала; ответы 429
-содержат `Retry-After`. Для мониторинга задайте `[server] metrics_socket = "/run/gatekeeper/ops.sock"`:
-по этому Unix-сокету (права 0600, только Linux) отдаются `GET /healthz` и `GET /metrics` (формат Prometheus).
+- Beta (0.3.x). The test suite has 700+ tests and CI runs lint, type checks, `pip-audit`,
+  CodeQL and a lock-file drift check.
+- The project has been through several internal and external audit passes. There is **no formal
+  third-party certification or penetration test**. Findings and fixes are tracked in
+  [docs/SECURITY-HISTORY.md](docs/SECURITY-HISTORY.md); the threat model is in
+  [docs/threat-model.md](docs/threat-model.md).
+- All provider secrets live in the memory of one gateway process. Compromising the gateway host
+  compromises every configured provider token.
+- Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
-Управление клиентами (действует сразу, перезапуск шлюза не нужен):
+## Documentation
 
-    gatekeeper freeze   --id mybot      # временно заблокировать
-    gatekeeper unfreeze --id mybot
-    gatekeeper revoke   --id mybot      # навсегда; вернуть нельзя, выпустите нового клиента
-    gatekeeper renew    --id mybot --ca-key /safe/ca.key --out ./mybot-bundle-new [--days 90]
-    #    новый сертификат и ключ, права и статус сохраняются, старый пакет перестаёт работать сразу
-    gatekeeper renew-server --ca-key /safe/ca.key [--days 365] [--host gw.example.com]
-    #    серверный сертификат шлюза (365 дней по умолчанию); SAN берутся из текущего,
-    #    после замены перезапустите службу. CA не меняется, клиентские пакеты остаются действительны.
+- [README.ru.md](README.ru.md): full guide in Russian (install, config, providers, audit log, decoys, limits)
+- [SECURITY.md](SECURITY.md), [docs/threat-model.md](docs/threat-model.md)
+- [CHANGELOG.md](CHANGELOG.md)
 
-Автозаморозка (по умолчанию выключена). Шлюз сам замораживает клиента, у которого за `autofreeze_window`
-секунд набралось `autofreeze_threshold` отказов из набора: неверная подпись, повтор, нарушение политики.
-Включается в `config.toml`:
+## License
 
-    [anomaly]
-    autofreeze_threshold = 10   # 0 = выключено
-    autofreeze_window = 60
-
-Считаются только отказы клиента с действующим сертификатом, поэтому чужак заморозить клиента не может.
-Квоты, расхождение часов и приманки не считаются. В журнал пишется `client_frozen` с `"auto": true`
-(уровень alert); снять блокировку: `gatekeeper unfreeze`. Счётчики хранятся в `state.db` и
-переживают перезапуск шлюза.
-
-Подтверждение опасных действий (по умолчанию выключено). Методы из `[confirm] apis` шлюз выполняет
-только после того, как оператор подтвердил конкретный запрос на машине шлюза:
-
-    [confirm]
-    apis = ["deleteMessage", "banChatMember"]   # пусто = выключено
-    ttl = 300                                   # сколько секунд живут заявка и подтверждение
-
-Первый запрос создаёт заявку и получает обычный нейтральный 403 (причина только в журнале:
-`deny_confirm_required`, `confirm_new:<id>`). Дальше:
-
-    gatekeeper pending                 # id, клиент, метод, размер и хеш тела, предпросмотр (секреты замаскированы)
-    gatekeeper approve --id <id>       # хватит первых 6 символов; действует сразу, перезапуск не нужен
-    gatekeeper reject  --id <id>       # отклонить заявку или отозвать неиспользованное подтверждение
-
-После `approve` клиент повторяет тот же вызов, и он проходит один раз. Подтверждение привязано к
-клиенту, методу, имени API и SHA-256 тела: изменённое тело, другой клиент или второй вызов требуют
-новой заявки. Метод должен быть и в правилах клиента (`--allow`): `[confirm]` политику не обходит.
-
-Тело подтверждаемого метода обязано быть строгим JSON: дубли ключей (на любой глубине), `NaN`,
-`Infinity` и не-JSON отклоняются с 400, потому что иначе оператор не увидит, что уйдёт в хвосте тела.
-`gatekeeper pending` показывает оператору сами параметры (`params: {...}`), а не первые байты тела;
-секреты в них замаскированы. Отсюда ограничение: `[confirm]` не подходит для form/multipart-загрузок.
-
-Заявки создаёт только клиент с верной подписью и действующим сертификатом; такие отказы в
-автозаморозку не засчитываются. Лимит: 20 заявок на клиента и 100 всего (дальше `confirm_queue_full`
-в журнале). Дневная квота проверяется до подтверждения: отказ по бюджету не расходует одобрение.
-Клиент не отличает «ждёт подтверждения» от обычного отказа: повторяйте вызов после сообщения оператора.
-Заявки лежат в `<data-dir>/approvals.json` (0600). Повреждённая запись пропускается и вычищается,
-а не ломает `pending`. `approve` и `reject` сначала пишут событие в журнал, затем меняют заявку:
-если журнал недоступен, подтверждение не выдаётся.
-
-Для systemd: `User=gatekeeper`, `ExecStart=/путь/к/.venv/bin/gatekeeper run`, `Restart=on-failure`.
-Токен провайдера лучше не держать в `EnvironmentFile=` (он виден в `/proc/<pid>/environ`): положите его
-в файл 0400 и передайте через `LoadCredential=upstream-token:/etc/gatekeeper/upstream-token`, а в
-`config.toml` укажите `secret_file = "/run/credentials/gatekeeper.service/upstream-token"`.
-Готовый юнит с этими настройками: `deploy/gatekeeper.service`.
-
-## Несколько провайдеров на одном шлюзе
-
-В `config.toml` вместо `[provider]`:
-
-    [providers.telegram]
-    secret_env = "GK_TG_TOKEN"
-    [providers.github]
-    secret_file = "/etc/gatekeeper/github.token"
-
-Клиент привязывается к провайдеру при выпуске (токен другого провайдера он не увидит и не вызовет):
-
-    gatekeeper add-client --id tgbot --provider telegram --allow POST:sendMessage ...
-    gatekeeper add-client --id ci --provider github --allow GET:getUser ...
-
-Клиент без поля `provider` работает с `[server] default_provider` (если не задан, то с первым провайдером; при нескольких провайдерах шлюз тогда не запустится, пока такие клиенты есть, либо задайте `default_provider`, либо перевыпустите их с `--provider`).
-
-На провайдера задаются `confirm_apis`, `max_response_bytes`, `max_inflight`; метрики `gk_upstream_*` имеют метку `provider`. Нужны оба
-провайдера одному приложению: выпустите ему два клиента (два сертификата). Если провайдер клиента
-не настроен на шлюзе, запрос получает отказ `provider_unavailable`. Секреты всех провайдеров маскируются в журнале и предпросмотре подтверждений; в записи `request_ok` есть поле `provider`.
-
-## OpenAI, Vercel и Cloudflare
-
-Подключаются так же, как GitHub: таблицы `[providers.openai]`, `[providers.vercel]`,
-`[providers.cloudflare]` (секрет по умолчанию в `GATEKEEPER_<ИМЯ>_TOKEN` или в `secret_file`):
-
-    [providers.openai]
-    secret_file = "/etc/gatekeeper/openai.key"
-    max_response_bytes = 16777216
-    [providers.cloudflare]
-    confirm_apis = ["createDnsRecord", "purgeCache"]
-
-    gatekeeper add-client --id agent --provider openai --allow POST:chatCompletions ...
-
-- **OpenAI:** `listModels` (`GET`), `chatCompletions`, `createResponse`, `createEmbedding` (`POST` с
-  JSON-телом). Стриминг (`stream: true`) запрещён: шлюз отдаёт ответ целиком. Шлюз ограничивает число
-  запросов клиента, но не расход токенов и деньги: лимит трат задайте в самом OpenAI (project budget).
-- **Vercel (только чтение):** `getUser`, `listProjects`, `listDeployments`, `listDomains`, `getProject`,
-  `getDeployment`. Политика не допускает query-параметров, поэтому `teamId` передать нельзя: выпустите
-  токен, ограниченный командой или проектом.
-- **Cloudflare:** `verifyToken`, `listAccounts`, `listZones`, `getZone`, `listDnsRecords`,
-  `createDnsRecord`, `purgeCache`. Нужен API-токен (`cfut_`, `cfat_` или старый 40-символьный), Global
-  API Key не поддерживается. Выдайте токену минимальные права и добавьте `createDnsRecord` и
-  `purgeCache` в `confirm_apis`.
-
-Методы с идентификатором принимают его в JSON-теле `POST`, шлюз сам вставляет его в путь и выбирает
-метод upstream: `BotApi(...).call("getDeployment", {"id": "dpl_..."})`. Для долгих ответов OpenAI передайте
-`timeout=120` (клиентский таймаут по умолчанию 30 с). Новый метод
-добавляется одной строкой в таблицу `ROUTES` провайдера (`src/gatekeeper/server/providers/`). Шлюз
-поддерживает только `GET` и `POST`: методы `PUT`, `PATCH`, `DELETE` (изменение и удаление DNS-записей,
-удаление деплоев) недоступны.
-
-## GitHub вместо Telegram
-
-В `config.toml`:
-
-    [provider]
-    name = "github"
-    # токен: GATEKEEPER_UPSTREAM_TOKEN или secret_file (классический ghp_... или fine-grained github_pat_...)
-
-Доступны методы `getUser`, `listRepos`, `listNotifications`, `getRateLimit` (только `GET`, без тела):
-
-    gatekeeper add-client --id ci --ca-key /safe/ca.key --out ./ci-bundle --allow GET:getUser --allow GET:listRepos
-
-Клиент: `BotApi("./ci-bundle", "gw.example.com", 8443).call("getUser", http_method="GET")`.
-Новый метод GitHub добавляется одной строкой в `_ROUTES` (`src/gatekeeper/server/providers/github.py`).
-Токен, найденный в ответе GitHub, блокируется так же, как у Telegram. Если вам хватает fine-grained
-токена GitHub с минимальными правами, шлюз нужен прежде всего для отзыва клиентов, подписи и журнала.
-
-## Клиент
-
-    from gatekeeper.client.botapi import BotApi
-    bot = BotApi("./mybot-bundle", "gw.example.com", 8443)
-    bot.send_message(chat_id, "привет")
-
-Полный пример: `examples/client_send_message.py`. Скачивание файлов идёт через метод
-`downloadFile` (правило `POST:downloadFile`): ссылки с токеном клиент не получает.
-
-## Приманки
-
-    gatekeeper decoy-create --name old-backup --ca-key /safe/ca.key --out ./decoy --hint "~/old/"
-
-Положите `./decoy` туда, где вор будет искать секреты. Любой запрос с этим сертификатом даёт
-запись `decoy_triggered` в журнале и бан IP на `decoy_ban_seconds`.
-
-## Журнал
-
-    gatekeeper audit-verify     # проверка цепочки хешей: правка, удаление или перестановка записей ломают её
-    gatekeeper audit-repair     # отрезать недописанную последнюю строку и записать audit_tail_repaired
-    gatekeeper audit-anchor --out /путь/вне/шлюза/anchors.log   # якорь головы цепочки
-    gatekeeper audit-verify --anchors /путь/вне/шлюза/anchors.log
-    gatekeeper list-clients
-
-Размер журнала ограничен: при `[server] audit_max_bytes` (по умолчанию 64 МиБ) запись начинает
-новый сегмент, старый переименовывается в `audit.log.<unix-ts>` и рядом пишется его голова
-`audit.log.<unix-ts>.head` (сегмент проверяется отдельно: `audit-verify` с этим файлом головы).
-Первый сегмент начинается с события `audit_segment_started`, в нём зафиксированы seq/hash/размер
-предыдущего. `audit_keep` (по умолчанию 10) задаёт число сохраняемых архивов; `audit_max_bytes = 0`
-выключает ротацию. Ротация происходит при записи, поэтому долго работающий шлюз тоже не растёт без границ.
-
-### Внешние якоря
-
-Цепочка хешей и `chain.head` лежат рядом с журналом, поэтому тот, кто может писать в каталог
-данных, способен обрезать хвост или переписать журнал целиком. Якорь это строка
-`{"hash":...,"seq":N,"ts":T}` с головой цепочки; он не содержит секретов. Храните якоря там, куда
-взломщик со шлюза не дотянется: другой хост, носитель только для добавления (`chattr +a`), git,
-почта. `audit-anchor` печатает якорь в stdout, так что его можно сразу переслать:
-
-    gatekeeper audit-anchor | ssh backup-host 'cat >> gatekeeper-anchors.log'
-
-Удобно запускать из cron. `audit-verify --anchors FILE` сверяет журнал с каждым якорем: якорь
-с seq больше длины журнала значит, что хвост удалён; несовпадение хеша значит, что журнал
-переписан. Защита действует только для записей, которые уже были заякорены.
-
-Причины отказов (подпись, повтор, политика, лимиты, приманка) есть только в журнале; клиент
-получает нейтральный ответ (403/429) без причины.
-
-### Журнал с оборванной последней строкой
-
-Если запись оборвалась на середине (`kill -9`, нет места на диске, потеря питания), `audit.log`
-заканчивается без `\n`. Такая строка не была подтверждена клиенту (fsync не прошёл), поэтому её
-безопасно отрезать по последнему `\n`:
-
-- шлюз делает это сам при старте и при следующей записи (усечение с событием
-  `audit_tail_repaired`: число и SHA-256 удалённых байт). Раньше он не стартовал или отвечал 500;
-- вручную, если шлюз остановлен: `gatekeeper audit-repair`, затем `gatekeeper audit-verify`.
-
-Другие повреждения (правка, удаление записи, разрыв цепочки) команда не чинит: она сообщает об
-ошибке и возвращает 2. Если в файле нет ни одной полной строки, автоматическое усечение тоже
-отказывается — восстанавливайте из бэкапа. После починки создайте свежий якорь (`audit-anchor`) и
-зафиксируйте инцидент отдельно: хвост удалён, но кто и почему оборвал запись, журнал не знает.
-
-## Что клиенту не отдаётся
-
-Токен бота, пути upstream, причины отказов. Ответ upstream, содержащий точное значение токена
-шлюза (или его секретной части), блокируется (502) и пишется как `response_secret_blocked`.
-Посторонняя строка, лишь похожая на токен (например, в чужом сообщении), ответ не блокирует.
-
-## Известные ограничения MVP
-
-- Nonce, суточный бюджет, баны и счётчики аномалий пишутся в SQLite (`state.db`, WAL) и переживают
-  перезапуск службы. Режим `synchronous=NORMAL` не гарантирует последние транзакции при внезапной
-  потере питания (журнал аудита при этом пишется с fsync). Токен-бакет частоты запросов остаётся в памяти.
-- Журнал: запись идёт пачками (group commit): один fsync на пачку одновременных записей, каждый
-  вызывающий ждёт fsync своей пачки. Это даёт выигрыш только при параллельных запросах.
-- Журнал можно писать из нескольких процессов (шлюз, add-client, decoy-create): запись идёт под
-  файловым замком `audit.log.lock`, хвост журнала подхватывается под замком. Замок рекомендательный
-  и на сетевых ФС (NFS) не гарантирован; запускайте один шлюз на один каталог данных.
-- Тело запроса до 1 МБ по умолчанию (`max_body_bytes`); большие загрузки пока не поддерживаются.
-- Бан приманки действует на IP целиком (и на настоящих клиентов с того же адреса).
-- Без внешних якорей удаление хвоста журнала вместе с `chain.head` не обнаруживается; якоря
-  создаются вручную или по cron (`audit-anchor`), автоматической отправки нет.
-- Подтверждения не защищают от оператора, который одобряет не глядя, и от компрометации самого шлюза.
-- Реализованы провайдеры Telegram, GitHub, OpenAI, Vercel и Cloudflare; несколько провайдеров на одном шлюзе с версии 0.3.5
-  (клиент привязан к одному провайдеру; приложению, которому нужны оба, выдаются два клиента).
-  v2: ротация ключей, один клиент на несколько провайдеров, очереди getUpdates, больше методов GitHub.
-
-## Известные проблемы
-
-Результаты внутренних аудитов 0.3.1, 0.3.2, 0.3.3 и пентеста 0.3.3 (22.11.2026). Критических
-уязвимостей не найдено. История исправлений: [docs/SECURITY-HISTORY.md](docs/SECURITY-HISTORY.md).
-Исправлено в 0.3.2: проверка `--allow`, fsync каталога при записи реестра, проверка прав `clients.json`.
-Исправлено в 0.3.3: блокировка ответа по токеноподобной строке, квадратичное время фильтра и
-маскирования, регистр имён в `[confirm]`, `fullmatch` вместо `match`, `upstream_tls = false` только
-для loopback, удаление сокета метрик только если это сокет.
-Исправлено в 0.3.4: фильтр ответа (полный токен, повторяющиеся ключи JSON, любое `Content-Encoding`
-кроме `identity`, JSON по содержимому), права файлов данных, проверка записей `approvals.json`,
-границы значений конфига, SIGTERM, ограничение записей об отказах HMAC в журнал.
-0.3.5 и 0.3.6: несколько провайдеров на одном шлюзе (см. `CHANGELOG.md`).
-Исправлено в 0.3.8 (аудит 0.3.7):
-
-- журнал: оборванная последняя строка чинится автоматически или `audit-repair` (B-02); ротация по
-  размеру с проверяемыми сегментами и `audit_keep` (C-06); намерение пишется до upstream (C-07);
-  `gk_*_seconds` — настоящие гистограммы (B-09).
-- SQLite-состояние (nonce, бюджет, баны, аномалии) пишется через `asyncio.to_thread` (B-04).
-- серверный сертификат продлевается `renew-server`, `status` предупреждает за 30 дней (C-03);
-  `init` идемпотентен и не меняет права существующих каталогов (B-12); `ca.key` можно шифровать
-  фразой (C-09).
-- подтверждения: строгий разбор JSON с запретом дублей ключей и показ параметров (C-04);
-  квота проверяется до подтверждения; повреждённая запись не ломает `pending` (B-10).
-- `freeze`/`revoke` меняют состояние первыми и явно сообщают, если журнал не записан; `approve`
-  пишется в журнал первым (C-05); `add-client` пишет пакет до реестра.
-- слоты соединений считают IPv6 сетью /64 и занимаются после mTLS (C-13); общий потолок памяти под
-  ответы upstream `max_total_response_bytes` (C-14); `list-clients` терпит нечисловой `expires` (B-15).
-- CI: Actions запинены по SHA (B-06), `requirements-dev.lock` с хешами и проверка дрейфа lock (B-07,
-  B-13), линтер проверяет `scripts/` (B-18); константа `X-Request-Id` одна (B-08).
-
-Открыто:
-
-- `Content-Type` не входит в подпись запроса: его изменение не ломает подпись. Это потребует
-  протокола v2 (клиент и шлюз меняются вместе), поэтому не менялось в 0.3.8.
-- `master_secret` лежит в `clients.json` открытым текстом; защита — права 0600 и владелец.
-- `[confirm]` ограничивает метод, а не параметры (тело подтверждается целиком по хешу): клиент с
-  `POST:sendMessage` может писать в любой чат. Это дизайн: ограничение по параметрам — v2.
-- Шлюз и `approve` работают под одним пользователем: оператор с доступом к машине шлюза может
-  одобрить что угодно. Заявки не защищают от самого оператора.
-- Бан приманки действует на IP целиком (в том числе на законных клиентов за тем же NAT).
-- Без внешних якорей удаление хвоста журнала вместе с архивом и `chain.head` не обнаруживается;
-  якоря создаются вручную или по cron, автоматической отправки нет.
-- Клиент только предупреждает, если `client.key`/`master.secret` доступны группе/остальным; строгого
-  отказа нет (пакет мог быть скопирован с другими правами).
-- Под нагрузкой и на реальном systemd-юните (`systemd-analyze security`) не измерялось; нагрузочные
-  тесты, фаззинг HTTP-парсера, TLS-клиента и JSON-фильтра и независимый пентест не проводились.
+Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
