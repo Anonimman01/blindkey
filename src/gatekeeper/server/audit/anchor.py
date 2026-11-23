@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gatekeeper.core.errors import AuditError
+from gatekeeper.core.fileio import write_all
 
 _HEX = frozenset("0123456789abcdef")
 ANCHOR_KEYS = frozenset({"seq", "ts", "hash"})
@@ -87,7 +88,7 @@ def append_anchor(path: str | os.PathLike, anchor: Anchor) -> None:
     except OSError as exc:
         raise AuditError("cannot open anchor file for writing") from exc
     try:
-        os.write(fd, serialize_anchor(anchor).encode("ascii") + b"\n")
+        write_all(fd, serialize_anchor(anchor).encode("ascii") + b"\n")
         os.fsync(fd)
     finally:
         os.close(fd)

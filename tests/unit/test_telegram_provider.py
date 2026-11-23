@@ -100,9 +100,9 @@ def test_foreign_token_shape_is_not_blocked():
     assert prov().filter_response(plain) is plain
 
 
-def test_non_json_body_with_json_content_type_checked_raw():
-    r = _json(b"not json at all /bothelp")
-    assert prov().filter_response(r) is r
+def test_non_json_body_with_json_content_type_is_blocked():
+    # Заявлен JSON, но тело не разбирается целиком: проверить его нельзя — блокируем (X-02).
+    assert prov().filter_response(_json(b"not json at all /bothelp")) is None
     assert prov().filter_response(_json(b"not json " + TOKEN.encode())) is None
 
 

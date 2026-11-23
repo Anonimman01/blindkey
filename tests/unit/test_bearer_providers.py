@@ -324,7 +324,13 @@ class _Up:
         self.calls = []
         self.response = UpstreamResponse(200, JSON, b'{"ok":true}')
 
-    async def fetch(self, req, timeout=None):
+    def begin_filter(self, resp):
+        return True
+
+    def release_response(self, resp):
+        return None
+
+    async def fetch(self, req, timeout=None, *, hold=False):
         self.calls.append((req, timeout))
         return self.response
 

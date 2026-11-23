@@ -7,11 +7,14 @@
 """
 from __future__ import annotations
 
+import sqlite3
+
 from gatekeeper.cli import output
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.events import EventType, Severity
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink
+from gatekeeper.server.state import StateStore
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry
 
@@ -26,14 +29,28 @@ def _make(action: str):
     status, event, severity = _ACTIONS[action]
 
     def run(args, layout: Layout) -> int:
+        store = None
         try:
             reg = Registry(layout.clients_file)
             entry = reg.load().get(args.id)
             fp = entry.get("fingerprint") if isinstance(entry, dict) else None
-            reg.set_status(args.id, status)
-        except (GatekeeperError, OSError) as exc:
+            current = entry.get("status") if isinstance(entry, dict) else None
+            # Второй слой заморозки живёт в state.db: unfreeze и revoke снимают и его (X-08).
+            if action in ("unfreeze", "revoke") and layout.state_db.exists():
+                # Не создаём state.db из CLI: на свежей установке его ещё нет (persist_state),
+                # а unfreeze не должен оставлять после себя пустую базу.
+                store = StateStore(layout.state_db)
+                store.del_freeze(args.id)
+            if action == "unfreeze" and current == "active":
+                pass  # автозаморозка не трогала реестр: снимать в нём нечего
+            else:
+                reg.set_status(args.id, status)
+        except (GatekeeperError, OSError, sqlite3.Error) as exc:
             output.error(str(exc))
             return 1
+        finally:
+            if store is not None:
+                store.close()
         try:
             AuditChain(FileSink(layout.audit_log)).append(
                 event, {"client": args.id, "fingerprint": fp}, severity)

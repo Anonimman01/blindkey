@@ -3,6 +3,8 @@
 Блокировка (fail closed) в случаях:
 - секрет найден побайтово, в тексте или в любой разобранной JSON-строке (в т. ч. в ключах),
   включая JSON-экранирование (\\u0041...);
+- заявленный JSON не разбирается целиком (обрыв, мусор в хвосте): проверить нельзя;
+- NDJSON: любая строка не JSON;
 - JSON слишком глубоко вложен;
 - в JSON-объекте повторяется ключ: `json.loads` оставил бы только последнее значение,
   и спрятанный в первом значении секрет не попал бы в проверяемое дерево.
@@ -13,7 +15,6 @@ JSON ищется по содержимому, а не только по заг�
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 
 from gatekeeper.server.providers.base import UpstreamResponse
@@ -21,7 +22,6 @@ from gatekeeper.server.providers.base import UpstreamResponse
 # Глубина вложенности JSON-ответа: ответы Bot API / GitHub неглубокие. Лимит явный, чтобы
 # блокировка не зависела от recursion limit и версии интерпретатора.
 MAX_JSON_DEPTH = 64
-_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.DOTALL)
 
 
 class _DuplicateKey(Exception):
@@ -29,11 +29,27 @@ class _DuplicateKey(Exception):
 
 
 def _json_too_deep(text: str, limit: int = MAX_JSON_DEPTH) -> bool:
-    """True, если скобки вне строк вложены глубже limit. Строки пропускаются целиком."""
+    """True, если скобки вне строк вложены глубже limit.
+
+    Один проход по символам, без регулярных выражений: шаблон строки с экранированием
+    давал квадратичное время на враждебном вводе (ReDoS). Строки пропускаются целиком,
+    экранированная кавычка строку не закрывает (X-01).
+    """
     depth = 0
-    for m in _JSON_TOKEN_RE.finditer(text):
-        ch = m.group()
-        if ch in "[{":
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
             depth += 1
             if depth > limit:
                 return True
@@ -92,6 +108,23 @@ def response_must_be_blocked(resp: UpstreamResponse, secrets: tuple[str, ...],
     text = resp.body.decode("utf-8", "replace")
     if leaks(text):
         return True
+    if not text.strip():
+        return False  # пустое тело (204 и т. п.): скрывать нечего
+    if "ndjson" in ct:
+        # NDJSON: каждая строка обязана быть корректным JSON без утечки (fail closed, X-02).
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if _json_too_deep(line):
+                return True
+            try:
+                data = json.loads(line, object_pairs_hook=_strict_object)
+            except (_DuplicateKey, RecursionError, ValueError):
+                return True
+            if _tree_leaks(data, leaks):
+                return True
+        return False
     if "json" not in ct and resp.body[:64].lstrip()[:1] not in (b"{", b"["):
         return False  # обычный текст (или тело без Content-Type, не похожее на JSON)
     if _json_too_deep(text):
@@ -101,7 +134,11 @@ def response_must_be_blocked(resp: UpstreamResponse, secrets: tuple[str, ...],
     except (_DuplicateKey, RecursionError):
         return True
     except ValueError:
-        # NDJSON: целиком не разобралось, но отдельные строки могут быть JSON.
+        if "json" in ct:
+            # Заявлен JSON, но тело целиком не разбирается (обрыв, мусор в хвосте):
+            # надёжно проверить его нельзя — блокируем (fail closed).
+            return True
+        # Не-JSON Content-Type: отдельные строки всё же могут быть JSON.
         for line in text.splitlines():
             line = line.strip()
             if line[:1] in ("{", "[") and _parsed_leaks(line, leaks):

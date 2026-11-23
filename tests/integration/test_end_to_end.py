@@ -13,6 +13,7 @@ from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.pki import ca
 from gatekeeper.server.app import build_app
 from gatekeeper.server.config import load_config
+from gatekeeper.server.state import StateStore
 
 
 def test_get_me_send_message_and_files(gw):
@@ -156,7 +157,13 @@ def test_autofreeze_over_real_mtls(gw):
             with pytest.raises(GatewayError) as e:
                 a.call("deleteWebhook", {})
             assert e.value.status == 403
-        assert _status(gw) == "frozen"
+        # X-08: автозаморозка пишется в state.db; реестр шлюзу только на чтение.
+        assert _status(gw) == "active"
+        store = StateStore(gw.layout.state_db)
+        try:
+            assert store.is_frozen("alice")
+        finally:
+            store.close()
         with pytest.raises(GatewayError):
             a.get_me()  # заморожен, хотя запрос корректен
     finally:
@@ -164,6 +171,12 @@ def test_autofreeze_over_real_mtls(gw):
     log = gw.layout.audit_log.read_text()
     assert '"auto":true' in log.replace(" ", "") and "client_frozen" in log
     assert main([*gw.base, "unfreeze", "--id", "alice"]) == 0
+    store = StateStore(gw.layout.state_db)
+    try:
+        assert not store.is_frozen("alice")  # unfreeze снимает слой в state.db
+    finally:
+        store.close()
+    assert _status(gw) == "active"
 
 
 def test_confirm_over_real_mtls(gw, capsys):

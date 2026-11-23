@@ -168,6 +168,19 @@ def test_body_exceeds_limit():
     assert denied(raw, HttpLimits(max_body=10)).status == 413
 
 
+def test_structural_json_suffix_uses_json_limit():
+    """application/vnd.api+json и подобные — тоже JSON: действует меньший потолок."""
+    limits = HttpLimits(max_body=1000, max_json_body=10)
+    for ct in (b"application/vnd.api+json", b"application/ld+json; charset=utf-8"):
+        raw = (b"POST /x HTTP/1.1\r\nHost: gw\r\nContent-Type: " + ct +
+               b"\r\nContent-Length: 20\r\n\r\n" + b"a" * 20)
+        assert denied(raw, limits, eof=False).status == 413, ct
+    # обычный текст того же размера проходит
+    plain = (b"POST /x HTTP/1.1\r\nHost: gw\r\nContent-Type: text/plain\r\n"
+             b"Content-Length: 20\r\n\r\n" + b"a" * 20)
+    assert parse(plain, limits).body == b"a" * 20
+
+
 def test_truncated_body():
     raw = b"POST /x HTTP/1.1\r\nHost: gw\r\nContent-Length: 10\r\n\r\nabc"
     assert denied(raw).status == 400

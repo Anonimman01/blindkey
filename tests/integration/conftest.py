@@ -40,6 +40,6 @@ def gw(tmp_path, monkeypatch):
     server = Server(build_app(layout, load_config(layout.config_file)), port)
     server.start()
     yield SimpleNamespace(fake=fake, port=port, bundle=bundle, layout=layout, base=base,
-                          cakey=cakey, decoy=decoy, tmp=tmp_path)
+                          cakey=cakey, decoy=decoy, tmp=tmp_path, app=server.app)
     server.stop()
     fake.stop()

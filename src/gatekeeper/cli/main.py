@@ -88,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("audit-verify")
     s.add_argument("--anchors", help="файл внешних якорей (см. audit-anchor): сверить журнал и с ними")
+    s.add_argument("--all-segments", action="store_true",
+                   help="проверить все ротированные сегменты по времени и текущий журнал")
     s.set_defaults(func=audit_verify.run)
 
     s = sub.add_parser("audit-repair", help="отрезать недописанную последнюю строку журнала")

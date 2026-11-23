@@ -9,6 +9,7 @@ from gatekeeper.pki import ca
 from gatekeeper.server.audit.sink import FileSink
 from gatekeeper.server.audit.verify import verify_file
 from gatekeeper.server.identity import _parse_entry
+from gatekeeper.server.state import load_frozen_clients
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry
 
@@ -49,6 +50,11 @@ def run(args, layout: Layout) -> int:
     invalid = sorted(cid for cid, entry in clients.items() if _parse_entry(cid, entry) is None)
     if invalid:
         output.error(f"invalid client entries (the gateway will reject these clients): {', '.join(invalid)}")
+    # Автозаморозка не меняет реестр, поэтому её не видно в сводке по статусам выше.
+    autofrozen = sorted(load_frozen_clients(layout.state_db))
+    if autofrozen:
+        output.info(f"autofrozen (state db, registry untouched): {', '.join(autofrozen)}"
+                    " — `gatekeeper unfreeze --id <id>`")
 
     _report_certificate(layout)
 

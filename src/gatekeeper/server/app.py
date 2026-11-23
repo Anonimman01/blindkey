@@ -8,9 +8,11 @@ import signal
 import ssl
 import stat
 import threading
+from collections.abc import Callable
 
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.events import EventType
+from gatekeeper.core.timeutil import unix_now
 from gatekeeper.pki import ca as pki_ca
 from gatekeeper.server.anomaly import AnomalyMonitor
 from gatekeeper.server.audit.chain import AuditChain
@@ -41,32 +43,42 @@ from gatekeeper.store.registry import Registry
 from gatekeeper.store.secrets import load_secret
 
 _CONN_DEADLINE = 120.0  # потолок на всё соединение
-_HANDSHAKE_TIMEOUT = 10.0
+_HANDSHAKE_TIMEOUT = 5.0
 _OPS_LINE_LIMIT = 4096  # длина строки запроса на служебном сокете
 
 
 class _HandshakeSlots:
-    """Синхронный счётчик одновременных рукопожатий (без await перед start_tls).
+    """Синхронный счётчик одновременных рукопожатий: общий и на IP (без await перед start_tls).
 
     Ждать семафор нельзя: до `start_tls` поток управления не должен уступать event loop,
     иначе уже пришедший ClientHello останется в буфере StreamReader и рукопожатие зависнет.
+    Слот на IP берётся до рукопожатия: один источник не может открыть много полуготовых
+    рукопожатий и держать их до таймаута (X-04).
     """
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, per_ip: int = 3) -> None:
         self._limit = max(1, limit)
+        self._per_ip = max(1, per_ip)
         self._lock = threading.Lock()
         self._used = 0
+        self._by_ip: dict[str, int] = {}
 
-    def try_acquire(self) -> bool:
+    def try_acquire(self, key: str) -> bool:
         with self._lock:
-            if self._used >= self._limit:
+            if self._used >= self._limit or self._by_ip.get(key, 0) >= self._per_ip:
                 return False
             self._used += 1
+            self._by_ip[key] = self._by_ip.get(key, 0) + 1
             return True
 
-    def release(self) -> None:
+    def release(self, key: str) -> None:
         with self._lock:
             self._used = max(0, self._used - 1)
+            left = self._by_ip.get(key, 0) - 1
+            if left > 0:
+                self._by_ip[key] = left
+            else:
+                self._by_ip.pop(key, None)  # ключи не копятся: слоты освобождаются
 
 
 def _unlink_if_socket(path: str) -> bool:
@@ -86,16 +98,19 @@ class GatekeeperApp:
     def __init__(self, *, pipeline: Pipeline, bans: IpBanList, limiter: ConnectionLimiter,
                  audit: AuditChain, http_limits: HttpLimits, ssl_ctx: ssl.SSLContext,
                  host: str, port: int, metrics: Metrics | None = None,
-                 metrics_socket: str | None = None) -> None:
+                 metrics_socket: str | None = None, max_handshaking_per_ip: int = 3) -> None:
         self.metrics, self.metrics_socket = metrics, metrics_socket
         self.pipeline, self.bans, self.limiter, self.audit = pipeline, bans, limiter, audit
         self.http_limits, self.ssl_ctx, self.host, self.port = http_limits, ssl_ctx, host, port
         self._malformed_log = RateLimiter(rate_per_sec=1.0, burst=5)  # защита журнала от флуда
         self._tls_log = RateLimiter(rate_per_sec=1.0, burst=5)
+        # Глобальный потолок на те же записи: флуд с множества разных IP не должен залить журнал.
+        self._malformed_log_all = RateLimiter(rate_per_sec=5.0, burst=20, max_keys=1)
+        self._tls_log_all = RateLimiter(rate_per_sec=5.0, burst=20, max_keys=1)
         self._conn_tasks: set[asyncio.Task] = set()  # живые обработчики соединений
-        # Рукопожатия ограничены общим числом слотов; слот на IP занимается только после
-        # успешного mTLS, поэтому медленные чужие рукопожатия не выедают лимит на клиента (C-13).
-        self._handshake_slots = _HandshakeSlots(limiter.max_total)
+        # Слот рукопожатия берётся ДО start_tls и держится до его конца (успех или сбой):
+        # один источник не может открыть много полуготовых рукопожатий (X-04).
+        self._handshake_slots = _HandshakeSlots(limiter.max_total, max_handshaking_per_ip)
 
     async def _handshake(self, writer: asyncio.StreamWriter, ip: str) -> bool:
         """mTLS-рукопожатие. Неудача пишется в журнал (с лимитом на IP) и закрывает соединение."""
@@ -109,9 +124,12 @@ class GatekeeperApp:
                 reason = "handshake_timeout"
             else:
                 reason = type(exc).__name__
-            if self._tls_log.allow(ip):
+            if self._tls_log.allow(normalize_ip(ip)) and self._tls_log_all.allow("*"):
                 await asyncio.to_thread(self.audit.append, EventType.DENY_TLS_HANDSHAKE,
                                         {"reason": str(reason)[:64], "ip": ip})
+            elif self.metrics is not None:
+                self.metrics.inc("gk_events_suppressed_total",
+                                 type=EventType.DENY_TLS_HANDSHAKE.value)
             return False
 
     async def _on_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -128,13 +146,22 @@ class GatekeeperApp:
         conn_key = normalize_ip(ip)
         acquired = False
         # Всё до start_tls — синхронно: иначе ClientHello успеет попасть в буфер StreamReader.
-        if not self._handshake_slots.try_acquire():
+        if not self._handshake_slots.try_acquire(conn_key):
+            # Отказ без записи в журнал: иначе флуд рукопожатиями зальёт журнал.
+            if self.metrics is not None:
+                self.metrics.inc("gk_handshake_rejected_total", reason="no_slot")
             writer.close()
             return
         try:
             async with asyncio.timeout(_CONN_DEADLINE):
-                if not await self._handshake(writer, ip):
-                    return
+                try:
+                    if not await self._handshake(writer, ip):
+                        return
+                finally:
+                    # Слот нужен только на время рукопожатия. Держать его до конца соединения
+                    # значило бы ограничивать не полуготовые рукопожатия, а число клиентов:
+                    # три медленных клиента с одного IP заняли бы лимит навсегда (X-04).
+                    self._handshake_slots.release(conn_key)
                 if await asyncio.to_thread(self.bans.is_banned, ip):
                     return
                 if not self.limiter.try_acquire(conn_key):
@@ -145,10 +172,14 @@ class GatekeeperApp:
                     req = await read_request(reader, self.http_limits)
                 except HttpError as exc:
                     rid = new_request_id()
-                    if self._malformed_log.allow(ip):
+                    if (self._malformed_log.allow(conn_key)
+                            and self._malformed_log_all.allow("*")):
                         await asyncio.to_thread(self.audit.append, EventType.DENY_MALFORMED,
                                                 {"reason": exc.reason, "ip": ip,
                                                  "rid": rid})
+                    elif self.metrics is not None:
+                        self.metrics.inc("gk_events_suppressed_total",
+                                         type=EventType.DENY_MALFORMED.value)
                     if self.metrics is not None:
                         self.metrics.inc("gk_requests_total", status=str(exc.status))
                     resp = stamp(neutral_response(exc.status), rid)
@@ -159,7 +190,6 @@ class GatekeeperApp:
         except (OSError, TimeoutError):
             pass
         finally:
-            self._handshake_slots.release()
             if acquired:
                 self.limiter.release(conn_key)
             writer.close()
@@ -278,6 +308,24 @@ def _validate_client_providers(*, registry_path, names: tuple[str, ...], default
                 "or re-issue the clients with --provider)")
 
 
+def _state_freezer(store: StateStore) -> Callable[[str], None]:
+    """Автозаморозка в state.db (X-08): под systemd каталог конфигурации только для чтения."""
+
+    def freeze(client_id: str) -> None:
+        store.set_freeze(client_id, unix_now())
+
+    return freeze
+
+
+def _registry_freezer(registry: Registry) -> Callable[[str], None]:
+    """Резерв при persist_state = false: заморозка в реестре, как было до 0.3.9."""
+
+    def freeze(client_id: str) -> None:
+        registry.set_status(client_id, "frozen")
+
+    return freeze
+
+
 def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     # Существующие файлы данных: права 0600, владелец, не симлинк (создание даёт 0600 само).
     for private in (layout.audit_log, layout.audit_log.parent / "chain.head",
@@ -306,14 +354,16 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     registry = Registry(layout.clients_file)
     registry.check_permissions()  # в файле лежат master_secret: группа/остальные не допускаются
     pipeline = Pipeline(
-        identity=IdentityStore(registry, ca_cert),
+        identity=IdentityStore(registry, ca_cert,
+                               state_frozen=store.is_frozen if store is not None else None),
         providers=providers, upstreams=upstreams,
         audit=audit, nonces=NonceCache(store=store), metrics=metrics,
         client_limiter=RateLimiter(cfg.rate_per_sec, cfg.burst),
         budget=DailyBudget(cfg.daily_budget, store=store), bans=bans,
         decoy_check=DecoyStore(layout.decoys_file).is_decoy, decoy_ban_seconds=cfg.decoy_ban_seconds,
         anomalies=AnomalyMonitor(cfg.autofreeze_threshold, cfg.autofreeze_window, store=store),
-        freeze_client=lambda cid: registry.set_status(cid, "frozen"),
+        # Автозаморозка пишется в state.db: каталог конфигурации под systemd только для чтения.
+        freeze_client=(_state_freezer(store) if store is not None else _registry_freezer(registry)),
         approvals=(Approvals(layout.approvals_file, cfg.confirm_ttl)
                    if cfg.confirm_apis or any(pc.confirm_apis for pc in cfg.effective_providers())
                    else None),
@@ -324,8 +374,9 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     return GatekeeperApp(
         pipeline=pipeline, bans=bans,
         limiter=ConnectionLimiter(cfg.max_connections, cfg.max_per_ip), audit=audit,
-        http_limits=HttpLimits(max_body=cfg.max_body_bytes, header_timeout=cfg.header_timeout,
-                               body_timeout=cfg.body_timeout),
+        http_limits=HttpLimits(max_body=cfg.max_body_bytes, max_json_body=cfg.max_json_body_bytes,
+                               header_timeout=cfg.header_timeout, body_timeout=cfg.body_timeout),
         ssl_ctx=build_server_context(layout.ca_cert, layout.server_cert, layout.server_key),
         host=cfg.listen_host, port=cfg.listen_port,
-        metrics=metrics, metrics_socket=cfg.metrics_socket)
+        metrics=metrics, metrics_socket=cfg.metrics_socket,
+        max_handshaking_per_ip=cfg.max_handshaking_per_ip)

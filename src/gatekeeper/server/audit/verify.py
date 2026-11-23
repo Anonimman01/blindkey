@@ -85,6 +85,42 @@ def verify_lines(
     return VerifyResult(True, len(lines), last_seq, prev), hashes
 
 
+@dataclass(frozen=True)
+class SegmentResult:
+    """Проверка одного сегмента: имя файла нужно оператору, чтобы понять, где сбой."""
+
+    segment: str
+    result: VerifyResult
+
+
+def verify_all_segments(
+    path: str | os.PathLike, *, anchors: Sequence[Anchor] | None = None
+) -> list[SegmentResult]:
+    """Все ротированные сегменты в хронологическом порядке, затем текущий журнал.
+
+    Проверка останавливается на первом сбое: дальше цепочка всё равно не имеет смысла.
+    """
+    from gatekeeper.server.audit.rotate import _archives  # избегаем цикла
+
+    sink = FileSink(path)
+    out: list[SegmentResult] = []
+    for _ts, archive in _archives(sink):
+        head = archive.with_name(archive.name + ".head")
+        if not head.exists():
+            # Без головы сегмент нечем проверить: его хвост можно отрезать незаметно.
+            out.append(SegmentResult(archive.name, VerifyResult(
+                ok=False, code="missing_head",
+                error="archive has no .head file: cannot verify it independently")))
+            return out
+        res = verify_file(archive, head)
+        out.append(SegmentResult(archive.name, res))
+        if not res.ok:
+            return out
+    out.append(SegmentResult(sink.path.name,
+                             verify_file(sink.path, sink.head_path, anchors=anchors)))
+    return out
+
+
 def verify_file(
     path: str | os.PathLike,
     head_path: str | os.PathLike | None = None,

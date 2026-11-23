@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -69,10 +70,15 @@ def _parse_entry(client_id: str, e: object) -> ClientRecord | None:
 
 class IdentityStore:
     def __init__(self, registry: Registry, ca_cert: x509.Certificate,
-                 clock: Callable[[], int] = unix_now) -> None:
+                 clock: Callable[[], int] = unix_now,
+                 state_frozen: Callable[[str], bool] | None = None) -> None:
         self._registry = registry
+        self._state_frozen = state_frozen  # слой автозаморозки в state.db
         self._ca = ca_cert
         self._clock = clock
+        # identify вызывается из разных потоков (asyncio.to_thread): снимок реестра и _sig
+        # меняются только под замком, иначе два потока могут разойтись в состоянии.
+        self._lock = threading.Lock()
         self._sig: object = "unset"
         self._by_fp: dict[str, ClientRecord] = {}
         self.invalid_entries = 0
@@ -83,20 +89,28 @@ class IdentityStore:
             sig = (st.st_mtime_ns, st.st_size, st.st_ino)
         except FileNotFoundError:
             sig = None
-        if sig == self._sig:
-            return
-        self._sig = sig
-        self._by_fp, self.invalid_entries = {}, 0
-        try:
-            clients = self._registry.load()
-        except GatekeeperError:
-            return  # повреждённый реестр: никого не пускаем
-        for cid, entry in clients.items():
-            rec = _parse_entry(cid, entry)
-            if rec is None:
-                self.invalid_entries += 1
-            else:
-                self._by_fp[rec.fingerprint] = rec
+        with self._lock:
+            if sig == self._sig:
+                return
+            self._sig = sig
+            by_fp: dict[str, ClientRecord] = {}
+            invalid = 0
+            try:
+                clients = self._registry.load()
+            except GatekeeperError:
+                clients = {}  # повреждённый реестр: никого не пускаем
+            for cid, entry in clients.items():
+                rec = _parse_entry(cid, entry)
+                if rec is None:
+                    invalid += 1
+                else:
+                    by_fp[rec.fingerprint] = rec
+            self._by_fp, self.invalid_entries = by_fp, invalid
+
+    def _lookup(self, fp: str) -> ClientRecord | None:
+        self._reload_if_changed()
+        with self._lock:
+            return self._by_fp.get(fp)
 
     def identify(self, peer_der: bytes | None) -> Identity:
         if not peer_der:
@@ -108,15 +122,16 @@ class IdentityStore:
             return Identity(fp, None, "bad_cert")
         if not pki_ca.validate_client_cert(cert, self._ca):
             return Identity(fp, None, "bad_cert")
-        self._reload_if_changed()
-        rec = self._by_fp.get(fp)
+        rec = self._lookup(fp)
         if rec is None:
             return Identity(fp, None, "unknown")
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
         if len(cn) != 1 or cn[0].value != rec.client_id:
             return Identity(fp, None, "cn_mismatch", rec.client_id)
-        if rec.status != "active":
+        if rec.status != "active":  # ручной freeze/revoke из реестра важнее всего
             return Identity(fp, None, "inactive", rec.client_id)
+        if self._state_frozen is not None and self._state_frozen(rec.client_id):
+            return Identity(fp, None, "inactive", rec.client_id)  # автозаморозка из state.db
         if self._clock() > rec.expires:
             return Identity(fp, None, "expired", rec.client_id)
         return Identity(fp, rec, "ok", rec.client_id)
