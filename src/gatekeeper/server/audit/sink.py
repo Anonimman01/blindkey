@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from gatekeeper.core.errors import AuditError
+from gatekeeper.core.fileio import write_all
 
 _BINARY = getattr(os, "O_BINARY", 0)  # Windows: не переводить \n в \r\n
 
@@ -121,22 +123,27 @@ class FileSink:
         try:
             if hasattr(os, "fchmod"):  # режим 0600 в open() действует только при создании файла
                 os.fchmod(fd, 0o600)
-            view = memoryview(payload)
-            while view:  # os.write может записать не всё
-                n = os.write(fd, view)
-                view = view[n:]
+            write_all(fd, payload)
             os.fsync(fd)
         finally:
             os.close(fd)
 
     def write_head(self, seq: int, hash_hex: str) -> None:
         """Атомарно записать голову цепочки: '<seq> <hash>'."""
-        tmp = self.head_path.with_name(self.head_path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY, 0o600)
+        # mkstemp: непредсказуемое имя и O_EXCL — подложенный симлинк не будет открыт.
+        fd, tmp_name = tempfile.mkstemp(dir=str(self.head_path.parent),
+                                        prefix=self.head_path.name + ".", suffix=".tmp")
+        tmp = Path(tmp_name)
         try:
-            os.write(fd, f"{seq} {hash_hex}\n".encode("ascii"))
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            write_all(fd, f"{seq} {hash_hex}\n".encode("ascii"))
             os.fsync(fd)
-        finally:
+        except BaseException:
+            os.close(fd)
+            tmp.unlink(missing_ok=True)
+            raise
+        else:
             os.close(fd)
         os.replace(tmp, self.head_path)
         _fsync_dir(self.head_path.parent)

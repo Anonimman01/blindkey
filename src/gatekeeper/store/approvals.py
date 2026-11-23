@@ -41,10 +41,14 @@ class ApprovalError(GatekeeperError):
     """Ошибка хранилища подтверждений."""
 
 
-def request_key(client_id: str, http_method: str, api: str, body: bytes) -> str:
-    """Ключ заявки: хеш от клиента, метода, имени API и хеша тела."""
+def request_key(client_id: str, http_method: str, api: str, body: bytes,
+                content_type: str = "") -> str:
+    """Ключ заявки: хеш от клиента, метода, имени API, хеша тела и Content-Type.
+
+    Content-Type входит в ключ: одно и то же тело как JSON и как form — разные запросы (X-03).
+    """
     body_hash = hashlib.sha256(body).hexdigest()
-    raw = "\n".join((client_id, http_method, api, body_hash)).encode("utf-8")
+    raw = "\n".join((client_id, http_method, api, body_hash, content_type)).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -65,7 +69,9 @@ def _validate_entry(key: object, v: object) -> None:
         raise ValueError("bad entry")
     if v.get("status") not in (PENDING, APPROVED):
         raise ValueError("bad status")
-    for f in ("client", "method", "api", "preview", "ip"):
+    # Записи старого формата (без content_type) считаются повреждёнными и отбрасываются:
+    # заявки живут ttl секунд, терять их при обновлении не жалко (миграция не нужна).
+    for f in ("client", "method", "api", "preview", "ip", "content_type"):
         if not isinstance(v.get(f), str):
             raise ValueError(f"bad {f}")
     if not _is_hex64(v.get("body_sha256")):
@@ -73,7 +79,8 @@ def _validate_entry(key: object, v: object) -> None:
     for f in ("body_len", "created", "expires"):
         if not _is_int(v.get(f)):
             raise ValueError(f"bad {f}")
-    raw = "\n".join((v["client"], v["method"], v["api"], v["body_sha256"])).encode("utf-8")
+    raw = "\n".join((v["client"], v["method"], v["api"], v["body_sha256"],
+                     v["content_type"])).encode("utf-8")
     if hashlib.sha256(raw).hexdigest() != key:
         raise ValueError("key does not match entry")
 
@@ -168,9 +175,9 @@ class Approvals:
 
     # ---- шлюз ----
     def request(self, client_id: str, http_method: str, api: str, body: bytes,
-                preview: str, ip: str) -> RequestResult:
+                preview: str, ip: str, content_type: str = "") -> RequestResult:
         """Подтверждение есть: израсходовать его (approved). Иначе завести или найти заявку."""
-        key = request_key(client_id, http_method, api, body)
+        key = request_key(client_id, http_method, api, body, content_type)
         rid = key[:ID_LEN]
         with self._locked():
             items, dropped = self._read()
@@ -194,6 +201,7 @@ class Approvals:
                 "client": client_id, "method": http_method, "api": api,
                 "body_sha256": hashlib.sha256(body).hexdigest(), "body_len": len(body),
                 "preview": preview, "ip": ip, "status": PENDING,
+                "content_type": content_type,
                 "created": now, "expires": now + self.ttl,
             }
             self._save(items)

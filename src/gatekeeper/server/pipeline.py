@@ -17,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from gatekeeper.core import constants
 from gatekeeper.core.errors import SigningError
@@ -150,30 +152,52 @@ class Pipeline:
         pool = self.confirm_apis | self._provider_confirm.get(pname or self.default_provider, frozenset())
         return any(name == a.casefold() for a in pool)
 
-    async def _confirm(self, cid: str, decision, req: ParsedRequest, ip: str) -> tuple[str | None, bytes | None]:
-        """Опасный метод: (id подтверждения, None) если подтверждён, иначе (None, ответ-отказ).
+    async def _confirm(self, cid: str, decision, req: ParsedRequest,
+                       ip: str) -> tuple[str | None, bytes | None, ParsedRequest]:
+        """Опасный метод: (id, None, запрос) если подтверждён, иначе (None, отказ, запрос).
+
+        Запрос возвращается всегда: для подтверждённого метода тело пересобрано из JSON.
 
         Тело разбирается как строгое JSON (дубли ключей и NaN запрещены), оператору
         показываются параметры, а не первые байты тела (C-04). Подтверждение расходуется
         здесь же; квота проверяется до этого вызова, поэтому отказ по бюджету его не съедает.
+        Непустое тело — только application/json (X-03): form/multipart оператор и upstream
+        разобрали бы по-разному, а подтверждать надо ровно то, что уйдёт провайдеру. Пустое
+        тело пересобирать не из чего, поэтому оно проходит как раньше, без Content-Type.
         """
         approvals = self.approvals
         if approvals is None:  # вызывается только при включённых подтверждениях
             raise RuntimeError("approvals are not configured")
         api = decision.api_name
+        ct = (req.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if req.body and ct != "application/json":
+            return None, await self._deny(EventType.DENY_MALFORMED, 400,
+                                          "confirm_requires_json", ip, cid), req
         try:
             params = await asyncio.to_thread(parse_confirm_params, req.body)
             preview = await asyncio.to_thread(describe_params, params, self._all_secrets)
         except ConfirmBodyError as exc:
-            return None, await self._deny(EventType.DENY_MALFORMED, 400, str(exc), ip, cid)
+            return None, await self._deny(EventType.DENY_MALFORMED, 400, str(exc), ip, cid), req
+        # Тело пересобирается из разобранных параметров: upstream получит ровно то, что
+        # видел оператор, а не исходные байты с возможными разночтениями парсеров.
+        try:
+            body = req.body if params is None else json.dumps(
+                params, sort_keys=True, ensure_ascii=True, allow_nan=False,
+                separators=(",", ":")).encode("ascii")
+        except (ValueError, RecursionError):
+            return None, await self._deny(EventType.DENY_MALFORMED, 400,
+                                          "confirm_body", ip, cid), req
+        req = replace(req, body=body, headers={**req.headers, "content-type": "application/json"})
         res = await asyncio.to_thread(
-            approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip)
+            approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip,
+            "application/json")
         if res.state == "approved":
-            return res.id, None
+            return res.id, None, req
         reason = {"new": f"confirm_new:{res.id}", "pending": f"confirm_pending:{res.id}",
                   "full": "confirm_queue_full"}[res.state]
         sev = Severity.ALERT if res.state in ("new", "full") else Severity.WARNING
-        return None, await self._deny(EventType.DENY_CONFIRM_REQUIRED, 403, reason, ip, cid, sev)
+        return None, await self._deny(
+            EventType.DENY_CONFIRM_REQUIRED, 403, reason, ip, cid, sev), req
 
     async def handle(self, req: ParsedRequest, ip: str, peer_der: bytes | None) -> bytes:
         rid = new_request_id()
@@ -195,7 +219,8 @@ class Pipeline:
             request_id.reset(token)
 
     async def _handle(self, req: ParsedRequest, ip: str, peer_der: bytes | None) -> bytes:
-        ident = self.identity.identify(peer_der)
+        # identify читает реестр и слой заморозки в SQLite: не в потоке event loop (B-04).
+        ident = await asyncio.to_thread(self.identity.identify, peer_der)
         if ident.fingerprint and self.decoy_check and self.decoy_check(ident.fingerprint):
             await asyncio.to_thread(self.bans.ban, ip, self.decoy_ban_seconds)
             await self._log(EventType.DECOY_TRIGGERED,
@@ -244,7 +269,7 @@ class Pipeline:
                                     retry_after=self.budget.seconds_until_reset())
         confirmed = None
         if self.approvals is not None and self._needs_confirm(decision.api_name, pname):
-            confirmed, refusal = await self._confirm(cid, decision, req, ip)
+            confirmed, refusal, req = await self._confirm(cid, decision, req, ip)
             if refusal is not None:
                 return refusal
         if not await asyncio.to_thread(self.budget.try_spend, cid):
@@ -253,8 +278,10 @@ class Pipeline:
 
         api = decision.api_name
         try:
-            up_req = provider.build_request(
-                api, decision.rule.http_method, req.body, req.headers.get("content-type"))
+            # Разбор тела (JSON до сотен КБ) не должен останавливать событийный цикл.
+            up_req = await asyncio.to_thread(
+                provider.build_request, api, decision.rule.http_method, req.body,
+                req.headers.get("content-type"))
         except ProviderError as exc:
             return await self._deny(EventType.DENY_MALFORMED, 400, str(exc), ip, cid)
         sem = self._inflight[pname]
@@ -274,27 +301,42 @@ class Pipeline:
             async with sem:
                 timeout = provider.upstream_timeout(api, req.body)
                 if timeout is None:
-                    up_resp = await upstream.fetch(up_req)
+                    up_resp = await upstream.fetch(up_req, hold=True)
                 else:
-                    up_resp = await upstream.fetch(up_req, timeout=timeout)
+                    up_resp = await upstream.fetch(up_req, timeout=timeout, hold=True)
         except UpstreamError as exc:
             self._upstream_metric(pname, "error", t0)
             await self._log("upstream_error", {"reason": str(exc), "client": cid, "api": api,
                                                "provider": pname, "ip": ip}, Severity.WARNING)
             return neutral_response(502)
-        self._upstream_metric(pname, str(up_resp.status), t0)
-        # фильтр разбирает тело до нескольких МБ: не в потоке event loop
-        safe = await asyncio.to_thread(provider.filter_response, up_resp)
-        if safe is None:
-            await self._log(EventType.RESPONSE_SECRET_BLOCKED,
-                            {"client": cid, "api": api, "ip": ip}, Severity.ALERT)
-            return neutral_response(502)
-        status = safe.status if (200 <= safe.status < 300 or safe.status in _PASSTHROUGH) else 502
-        await self._log(EventType.REQUEST_OK,
-                        {"client": cid, "api": api, "provider": pname, "ip": ip, "status": status,
-                         "bytes": len(safe.body),
-                         **({"confirmed": confirmed} if confirmed else {})})
+        # try открыт сразу после fetch: любая ошибка ниже (метрика, фильтр) не должна
+        # оставить резерв памяти занятым до конца процесса (X-07).
         try:
-            return build_response(status, safe.body, safe.content_type)
-        except ValueError:
-            return neutral_response(502)
+            self._upstream_metric(pname, str(up_resp.status), t0)
+            # Разбор JSON стоит примерно 8x тела: резерв держим и на время фильтрации.
+            if not upstream.begin_filter(up_resp):
+                # Действие на upstream уже выполнено, неидемпотентный запрос вслепую не
+                # повторять: оператор должен увидеть это в журнале как ALERT.
+                await self._log("response_budget_exceeded",
+                                {"client": cid, "api": api, "provider": pname, "ip": ip,
+                                 "executed": True}, Severity.ALERT)
+                return neutral_response(502)
+            # фильтр разбирает тело до нескольких МБ: не в потоке event loop
+            safe = await asyncio.to_thread(provider.filter_response, up_resp)
+            if safe is None:
+                await self._log(EventType.RESPONSE_SECRET_BLOCKED,
+                                {"client": cid, "api": api, "ip": ip}, Severity.ALERT)
+                return neutral_response(502)
+            status = safe.status if (200 <= safe.status < 300 or safe.status in _PASSTHROUGH) else 502
+            await self._log(EventType.REQUEST_OK,
+                            {"client": cid, "api": api, "provider": pname, "ip": ip,
+                             "status": status, "bytes": len(safe.body),
+                             **({"confirmed": confirmed} if confirmed else {})})
+            try:
+                return build_response(status, safe.body, safe.content_type)
+            except ValueError:
+                return neutral_response(502)
+        finally:
+            # Резерв снимается только после фильтра и сборки ответа (или отказа), иначе
+            # под конкуренцией реальная память превысит max_total_response_bytes (C-14).
+            upstream.release_response(up_resp)

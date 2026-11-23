@@ -30,7 +30,13 @@ class FakeUpstream:
         self.calls = []
         self.response = UpstreamResponse(200, "application/json", b'{"ok":true}')
 
-    async def fetch(self, req):
+    def begin_filter(self, resp):
+        return True
+
+    def release_response(self, resp):
+        return None
+
+    async def fetch(self, req, timeout=None, *, hold=False):
         self.calls.append(req)
         if isinstance(self.response, Exception):
             raise self.response

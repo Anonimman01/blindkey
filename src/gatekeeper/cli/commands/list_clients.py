@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from gatekeeper.cli import output
 from gatekeeper.core.errors import GatekeeperError
+from gatekeeper.server.state import load_frozen_clients
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry
 
@@ -31,6 +32,8 @@ def run(args, layout: Layout) -> int:
     if not clients:
         output.info("no clients")
         return 0
+    # Автозаморозка живёт в state.db и реестр не меняет: показываем её рядом со статусом.
+    autofrozen = load_frozen_clients(layout.state_db)
     for cid in sorted(clients):
         c = clients[cid]
         if not isinstance(c, dict):
@@ -38,7 +41,8 @@ def run(args, layout: Layout) -> int:
             continue
         fp = c.get("fingerprint")
         prov = c.get("provider")
-        output.info(f"{cid}\t{c.get('status','?')}\t"
+        status = str(c.get("status", "?")) + ("+auto" if cid in autofrozen else "")
+        output.info(f"{cid}\t{status}\t"
                     f"{fp if isinstance(fp, str) else '?'}\texpires {_expiry(c.get('expires'))}"
                     + (f"\tprovider {prov}" if isinstance(prov, str) else ""))
     return 0

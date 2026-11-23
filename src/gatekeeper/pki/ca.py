@@ -17,8 +17,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from gatekeeper.core.errors import PkiError
+from gatekeeper.core.fileio import write_all
 from gatekeeper.core.signing import is_valid_client_id
 
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # POSIX: не идти по подложенному симлинку
 _BACKDATE = timedelta(minutes=5)  # запас на расхождение часов
 _BINARY = getattr(os, "O_BINARY", 0)
 
@@ -230,13 +232,18 @@ def load_key_pem(pem: bytes, password: bytes | None = None) -> ec.EllipticCurveP
 
 def write_private_file(path: str | os.PathLike, data: bytes, overwrite: bool = False) -> None:
     """Записать секретный файл с правами 0600; по умолчанию не перезаписывает."""
-    flags = os.O_WRONLY | os.O_CREAT | _BINARY | (os.O_TRUNC if overwrite else os.O_EXCL)
+    flags = (os.O_WRONLY | os.O_CREAT | _BINARY | _NOFOLLOW
+             | (os.O_TRUNC if overwrite else os.O_EXCL))
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError as exc:
         raise PkiError(f"file already exists: {path}") from exc
+    except OSError as exc:
+        # Сюда попадают и overwrite=True (нет прав, каталог, только чтение), и O_NOFOLLOW на
+        # симлинке: CLI должен получить PkiError с понятным текстом, а не голый OSError.
+        raise PkiError(f"cannot open {path} for writing: {type(exc).__name__}") from exc
     try:
-        os.write(fd, data)
+        write_all(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)

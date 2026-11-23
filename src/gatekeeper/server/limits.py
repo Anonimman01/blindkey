@@ -22,17 +22,25 @@ DEFAULT_MAX_KEYS = 10_000
 
 
 def normalize_ip(ip: str) -> str:
-    """Ключ для лимитов соединений: IPv4 — как есть, IPv6 — сеть /64 (C-13).
+    """Ключ для лимитов: IPv4 — как есть, IPv4-mapped IPv6 — тот же IPv4, IPv6 — /64 (C-13).
 
     Клиенту обычно выдаётся целая /64, поэтому адреса из одной сети не должны
-    занимать все слоты `max_per_ip` по отдельности.
+    занимать все слоты `max_per_ip` по отдельности. IPv4-mapped адрес (`::ffff:1.2.3.4`)
+    приходит с двойного стека и обязан совпадать с обычным `1.2.3.4`, иначе лимиты и баны
+    обходятся сменой формы записи одного и того же адреса.
     """
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return ip
     if addr.version == 6:
-        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+        mapped = addr.ipv4_mapped
+        if mapped is not None:
+            return str(mapped)
+        try:
+            return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+        except ValueError:  # адрес со scope-id (fe80::1%eth0): ключ как есть
+            return ip
     return str(addr)
 
 
@@ -48,6 +56,7 @@ class IpBanList:
     def ban(self, ip: str, seconds: int) -> None:
         if seconds <= 0:
             return
+        ip = normalize_ip(ip)  # бан по источнику, а не по форме записи адреса
         now = self._clock()
         until = now + seconds
         with self._lock:
@@ -70,6 +79,7 @@ class IpBanList:
                 self._store.del_ban(oldest)
 
     def is_banned(self, ip: str) -> bool:
+        ip = normalize_ip(ip)
         now = self._clock()
         with self._lock:
             until = self._until.get(ip)

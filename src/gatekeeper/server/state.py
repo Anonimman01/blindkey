@@ -32,7 +32,30 @@ CREATE TABLE IF NOT EXISTS budget(
 CREATE TABLE IF NOT EXISTS bans(ip TEXT PRIMARY KEY, until INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hits(client TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS hits_client ON hits(client, ts);
+CREATE TABLE IF NOT EXISTS freezes(client TEXT PRIMARY KEY, ts INTEGER NOT NULL) WITHOUT ROWID;
 """
+
+
+def load_frozen_clients(path: str | os.PathLike) -> set[str]:
+    """Прочитать слой автозаморозки, не создавая базу и не меняя её (только чтение).
+
+    Нужно CLI (`status`, `list-clients`, `unfreeze`): базы может не быть (persist_state = false),
+    а открывать её на запись ради справки нельзя — система может быть смонтирована только для
+    чтения, и команда не должна оставлять файлов.
+    """
+    p = Path(path)
+    if not p.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return set()
+    try:
+        return {row[0] for row in conn.execute("SELECT client FROM freezes")}
+    except sqlite3.Error:
+        return set()  # база прежнего формата: таблицы freezes ещё нет
+    finally:
+        conn.close()
 
 
 class StateStore:
@@ -103,3 +126,16 @@ class StateStore:
 
     def clear_hits(self, client: str) -> None:
         self._exec("DELETE FROM hits WHERE client = ?", (client,))
+
+    # --- автозаморозка (X-08) ---
+    # Слой в state.db (каталог данных), а не в clients.json: под systemd каталог конфигурации
+    # доступен только на чтение, и запись в реестр там падала. Реестр остаётся источником
+    # ручной заморозки и отзыва; отзыв сильнее любого слоя.
+    def is_frozen(self, client: str) -> bool:
+        return bool(self._all("SELECT 1 FROM freezes WHERE client = ?", (client,)))
+
+    def set_freeze(self, client: str, ts: int) -> None:
+        self._exec("INSERT OR REPLACE INTO freezes VALUES (?,?)", (client, ts))
+
+    def del_freeze(self, client: str) -> None:
+        self._exec("DELETE FROM freezes WHERE client = ?", (client,))

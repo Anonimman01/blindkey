@@ -196,6 +196,18 @@ def test_write_private_file_no_overwrite(tmp_path):
     assert p.read_bytes() == b"three"
 
 
+def test_write_private_file_oserror_becomes_pki_error(tmp_path, monkeypatch):
+    """overwrite=True на недоступном пути: CLI получает PkiError, а не голый OSError."""
+    import gatekeeper.pki.ca as pki_mod
+
+    def deny(path, flags, mode=0o777):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(pki_mod.os, "open", deny)
+    with pytest.raises(PkiError):
+        pki.write_private_file(tmp_path / "k.pem", b"x", overwrite=True)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
 def test_private_file_is_0600(tmp_path):
     p = tmp_path / "k.pem"

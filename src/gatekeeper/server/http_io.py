@@ -40,6 +40,7 @@ class HttpLimits:
     max_headers: int = 50
     max_target: int = 256
     max_body: int = 1_048_576
+    max_json_body: int = 262_144  # JSON разбирается целиком: потолок меньше общего
     header_timeout: float = 10.0
     body_timeout: float = 30.0
 
@@ -50,6 +51,11 @@ class ParsedRequest:
     target: str
     headers: dict = field(default_factory=dict)  # имена в нижнем регистре
     body: bytes = b""
+
+
+def _is_json_media_type(content_type: str) -> bool:
+    """application/json и структурные суффиксы (application/ld+json, application/vnd.api+json)."""
+    return content_type == "application/json" or content_type.endswith("+json")
 
 
 def _proto_error(exc: Exception) -> HttpError:
@@ -145,7 +151,7 @@ async def _read_head(reader, conn, limits: HttpLimits, raw: bytearray):
     return ev
 
 
-async def _read_body(reader, conn, limits: HttpLimits) -> bytes:
+async def _read_body(reader, conn, limits: HttpLimits, max_body: int) -> bytes:
     parts: list[bytes] = []
     size = 0
     try:
@@ -154,7 +160,7 @@ async def _read_body(reader, conn, limits: HttpLimits) -> bytes:
                 ev = await _next_event(conn, reader)
                 if isinstance(ev, h11.Data):
                     size += len(ev.data)
-                    if size > limits.max_body:
+                    if size > max_body:
                         raise HttpError(413, "body_too_large")
                     parts.append(bytes(ev.data))
                 elif isinstance(ev, h11.EndOfMessage):
@@ -175,11 +181,15 @@ async def read_request(
     head = await _read_head(reader, conn, limits, raw)
     _check_raw_head(raw)
     method, target, headers = _validate_request(head, limits)
+    # JSON разбирается целиком (и повторно для подтверждения): потолок ниже общего.
+    ct = (headers.get("content-type") or "").split(";")[0].strip().lower()
+    max_body = (min(limits.max_body, limits.max_json_body)
+                if _is_json_media_type(ct) else limits.max_body)
     cl = headers.get("content-length")
     if cl is not None:
         if not cl.isascii() or not cl.isdigit():
             raise HttpError(400, "bad_content_length")
-        if int(cl) > limits.max_body:
+        if int(cl) > max_body:
             raise HttpError(413, "body_too_large")  # тело даже не читаем
-    body = await _read_body(reader, conn, limits)
+    body = await _read_body(reader, conn, limits, max_body)
     return ParsedRequest(method=method, target=target, headers=headers, body=body)

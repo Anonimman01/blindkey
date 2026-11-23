@@ -76,6 +76,8 @@ class Config:
     upstream_tls: bool = True
     max_connections: int = 100
     max_per_ip: int = 10
+    # Сколько одновременных TLS-рукопожатий допускается с одного IP (слот берётся до start_tls).
+    max_handshaking_per_ip: int = 3
     # Ротация журнала: 0 = выключена (журнал растёт без границ).
     audit_max_bytes: int = 64 * 1024 * 1024
     audit_keep: int = 10  # сколько прошлых сегментов журнала хранить
@@ -85,6 +87,8 @@ class Config:
     burst: int = 10
     daily_budget: int = 10000
     max_body_bytes: int = 1_048_576
+    # Отдельный, меньший потолок тела для JSON-маршрутов: разбор JSON дорог по памяти.
+    max_json_body_bytes: int = 262_144
     decoy_ban_seconds: int = 3600
     header_timeout: float = 10.0
     body_timeout: float = 30.0
@@ -119,8 +123,10 @@ _SCHEMA: dict[str, dict[str, type]] = {
         "upstream_host": str, "upstream_port": int, "upstream_tls": bool,
     },
     "limits": {
-        "max_connections": int, "max_per_ip": int, "rate_per_sec": float, "burst": int,
-        "daily_budget": int, "max_body_bytes": int, "decoy_ban_seconds": int,
+        "max_connections": int, "max_per_ip": int, "max_handshaking_per_ip": int,
+        "rate_per_sec": float, "burst": int,
+        "daily_budget": int, "max_body_bytes": int, "max_json_body_bytes": int,
+        "decoy_ban_seconds": int,
         "header_timeout": float, "body_timeout": float,
     },
     "anomaly": {"autofreeze_threshold": int, "autofreeze_window": int},
@@ -213,11 +219,14 @@ def load_config(path: str | Path) -> Config:
         if not math.isfinite(getattr(cfg, name)):
             raise ConfigError(f"{name} must be a finite number")
     upper = {"max_connections": _MAX_CONNECTIONS, "max_per_ip": _MAX_CONNECTIONS,
+             "max_handshaking_per_ip": _MAX_CONNECTIONS,
              "burst": _MAX_BURST, "daily_budget": _MAX_DAILY_BUDGET,
-             "max_body_bytes": _MAX_BODY_BYTES}
+             "max_body_bytes": _MAX_BODY_BYTES, "max_json_body_bytes": _MAX_BODY_BYTES}
     for name, high in upper.items():
         if not 1 <= getattr(cfg, name) <= high:
             raise ConfigError(f"{name} must be between 1 and {high}")
+    # max_json_body_bytes больше max_body_bytes — не ошибка: старый конфиг с малым общим
+    # потолком должен продолжать работать. Эффективный потолок JSON = min (см. http_io).
     if not 0 < cfg.header_timeout <= _MAX_TIMEOUT or not 0 < cfg.body_timeout <= _MAX_TIMEOUT:
         raise ConfigError(f"timeouts must be in (0, {_MAX_TIMEOUT:g}] seconds")
     if not 0 < cfg.rate_per_sec <= _MAX_RATE:

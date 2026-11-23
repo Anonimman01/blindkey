@@ -22,10 +22,12 @@ from pathlib import Path
 
 from gatekeeper.core.errors import AuditError
 from gatekeeper.core.events import EventType, Severity
+from gatekeeper.core.fileio import write_all
 from gatekeeper.core.timeutil import unix_now
 from gatekeeper.server.audit.sink import _BINARY, FileSink, _fsync_dir
 
 _ARCHIVE_TS = re.compile(r"^(\d+)(?:\.\d+)?$")
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # POSIX: не идти по подложенному симлинку
 
 
 @dataclass(frozen=True)
@@ -113,9 +115,12 @@ def rotate_audit_locked(
     line, digest = serialize_record(
         0, ts, EventType.AUDIT_SEGMENT_STARTED.value, Severity.INFO.value, data, GENESIS_HASH)
     pending = sink.path.with_name(sink.path.name + ".new")
-    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY, 0o600)
+    # Имя предсказуемо (его ищет recover_pending_rotation), поэтому O_NOFOLLOW обязателен.
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY | _NOFOLLOW, 0o600)
     try:
-        os.write(fd, line + b"\n")
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        write_all(fd, line + b"\n")
         os.fsync(fd)
     finally:
         os.close(fd)
