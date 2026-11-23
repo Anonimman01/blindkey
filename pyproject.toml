@@ -1,4 +1,4 @@
-[build-system]
+﻿[build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Anonimman01"}]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
@@ -74,8 +74,8 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RUF"]
 ignore = [
-    "E501",   # длину строк держит ревью, а не линтер
-    "RUF001", # кириллица в строках и комментариях: норма этого проекта
+    "E501",   # РґР»РёРЅСѓ СЃС‚СЂРѕРє РґРµСЂР¶РёС‚ СЂРµРІСЊСЋ, Р° РЅРµ Р»РёРЅС‚РµСЂ
+    "RUF001", # РєРёСЂРёР»Р»РёС†Р° РІ СЃС‚СЂРѕРєР°С… Рё РєРѕРјРјРµРЅС‚Р°СЂРёСЏС…: РЅРѕСЂРјР° СЌС‚РѕРіРѕ РїСЂРѕРµРєС‚Р°
     "RUF002",
     "RUF003",
 ]
