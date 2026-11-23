@@ -2,7 +2,7 @@
 
 Формат: [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/). Протокол не менялся.
 
-## [Unreleased]
+## [0.3.9] - 2026-11-23
 
 ### Changed
 
