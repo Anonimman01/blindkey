@@ -1,5 +1,6 @@
 """Сканер глубины JSON линеен (без ReDoS); неразбираемый JSON-ответ блокируется."""
 import json
+import random
 import re
 import time
 
@@ -95,6 +96,27 @@ def test_plain_text_and_valid_json_unchanged():
     assert not _blocked(b"\x00\x01binary", "application/octet-stream")
     assert not _blocked(b'{"ok":true}', "application/json")
     assert not _blocked(b"", "application/json")
+
+
+def test_ndjson_splits_only_on_newline():
+    """U+2028/\x85 внутри JSON-строки — не граница записи (splitlines() ломал валидный NDJSON)."""
+    line = json.dumps({"text": "a\u2028b\x85c"}, ensure_ascii=False).encode()
+    assert b"\n" not in line
+    assert not _blocked(line + b"\n", "application/x-ndjson")
+    assert _blocked(line[:-1] + TOKEN.encode() + b'"}', "application/x-ndjson")
+
+
+def test_scanner_verdict_depends_only_on_bracket_depth():
+    """Свойство: вердикт = «скобки вне строк глубже лимита», что бы ни было в строках."""
+    rnd = random.Random(20261123)
+    alphabet = ['"', BS, "[", "]", "{", "}", "a", "\u2028", "\x85", " ", "0", "\n"]
+    for _ in range(200):
+        payload = "".join(rnd.choice(alphabet) for _ in range(rnd.randrange(0, 80)))
+        depth = rnd.randrange(1, MAX_JSON_DEPTH + 4)
+        doc = "[" * depth + json.dumps(payload, ensure_ascii=False) + "]" * depth
+        json.loads(doc)  # документ валиден: проверяем именно сканер
+        assert _json_too_deep(doc) is (depth > MAX_JSON_DEPTH)
+        assert _json_too_deep(doc) == _old_too_deep(doc)
 
 
 def test_ndjson_is_checked_line_by_line():

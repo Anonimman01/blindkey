@@ -21,6 +21,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from functools import partial
 
 from gatekeeper.core import constants
 from gatekeeper.core.errors import SigningError
@@ -159,8 +160,9 @@ class Pipeline:
         Запрос возвращается всегда: для подтверждённого метода тело пересобрано из JSON.
 
         Тело разбирается как строгое JSON (дубли ключей и NaN запрещены), оператору
-        показываются параметры, а не первые байты тела (C-04). Подтверждение расходуется
-        здесь же; квота проверяется до этого вызова, поэтому отказ по бюджету его не съедает.
+        показываются параметры, а не первые байты тела (C-04). Здесь подтверждение
+        только проверяется; расходуется оно в `_handle` непосредственно перед обращением к
+        upstream, после всех остальных проверок (issue #11).
         Непустое тело — только application/json (X-03): form/multipart оператор и upstream
         разобрали бы по-разному, а подтверждать надо ровно то, что уйдёт провайдеру. Пустое
         тело пересобирать не из чего, поэтому оно проходит как раньше, без Content-Type.
@@ -189,8 +191,8 @@ class Pipeline:
                                           "confirm_body", ip, cid), req
         req = replace(req, body=body, headers={**req.headers, "content-type": "application/json"})
         res = await asyncio.to_thread(
-            approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip,
-            "application/json")
+            partial(approvals.request, cid, decision.rule.http_method, api, req.body, preview, ip,
+                    "application/json", consume=False))
         if res.state == "approved":
             return res.id, None, req
         reason = {"new": f"confirm_new:{res.id}", "pending": f"confirm_pending:{res.id}",
@@ -272,9 +274,6 @@ class Pipeline:
             confirmed, refusal, req = await self._confirm(cid, decision, req, ip)
             if refusal is not None:
                 return refusal
-        if not await asyncio.to_thread(self.budget.try_spend, cid):
-            return await self._deny(EventType.DENY_BUDGET, 429, "daily_budget", ip, cid,
-                                    retry_after=self.budget.seconds_until_reset())
 
         api = decision.api_name
         try:
@@ -288,6 +287,11 @@ class Pipeline:
         if sem.locked():  # изоляция: медленный провайдер не занимает все слоты шлюза
             return await self._deny(EventType.DENY_RATE_LIMIT, 503, "provider_busy", ip, cid,
                                     retry_after=1)
+        # Квоту списываем последней: ни отказ по подтверждению, ни битое/неподдерживаемое
+        # тело, ни занятый провайдер не должны «съедать» суточный лимит клиента.
+        if not await asyncio.to_thread(self.budget.try_spend, cid):
+            return await self._deny(EventType.DENY_BUDGET, 429, "daily_budget", ip, cid,
+                                    retry_after=self.budget.seconds_until_reset())
         # Намерение в журнал ДО upstream (C-07): при сбое записи действие не выполняется,
         # поэтому клиент может безопасно повторить запрос.
         intent: dict = {"client": cid, "api": api, "provider": pname, "ip": ip,
@@ -296,6 +300,16 @@ class Pipeline:
         if confirmed:
             intent["confirmed"] = confirmed
         await self._log(EventType.REQUEST_INTENT, intent)
+        if confirmed and self.approvals is not None:
+            # Подтверждение расходуется последним, после бюджета, разбора тела, слота провайдера
+            # и записи намерения: отказ на любом из этих шагов его не сжигает (issue #11).
+            # Параллельный запрос с тем же подтверждением мог успеть раньше: тогда отказ.
+            taken = await asyncio.to_thread(
+                self.approvals.consume, cid, decision.rule.http_method, api, req.body,
+                "application/json")
+            if not taken:
+                return await self._deny(EventType.DENY_CONFIRM_REQUIRED, 403,
+                                        f"confirm_consumed:{confirmed}", ip, cid, Severity.WARNING)
         t0 = time.monotonic()
         try:
             async with sem:

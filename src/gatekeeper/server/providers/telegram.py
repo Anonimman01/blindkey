@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 
 from gatekeeper.server.providers.base import (
     Provider,
@@ -34,6 +35,42 @@ DOWNLOAD_METHOD = "downloadFile"
 # Long polling: потолок параметра timeout у getUpdates и запас сверх него на сеть.
 MAX_POLL_SECONDS = 50
 POLL_MARGIN = 10.0
+# Form-тело разбираем ради одного параметра: гигантский body не должен тратить память.
+_MAX_FORM_BODY = 64 * 1024
+
+
+def _json_poll(body: bytes) -> int | None:
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    value = data.get("timeout") if isinstance(data, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _form_poll(body: bytes) -> int | None:
+    if len(body) > _MAX_FORM_BODY:
+        return None
+    try:
+        fields = urllib.parse.parse_qs(body.decode("ascii"), max_num_fields=64)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    raw = fields.get("timeout")
+    if not raw:
+        return None
+    try:
+        return int(raw[0])
+    except ValueError:
+        return None
+
+
+def _poll_seconds(body: bytes) -> int:
+    if not body:
+        return 0
+    value = _json_poll(body)
+    if value is None:
+        value = _form_poll(body)
+    return 0 if value is None else max(0, min(value, MAX_POLL_SECONDS))
 
 
 class TelegramProvider(Provider):
@@ -81,18 +118,14 @@ class TelegramProvider(Provider):
                                self._headers(body, content_type), body)
 
     def upstream_timeout(self, api_name: str, body: bytes) -> float | None:
-        """getUpdates держит соединение до `timeout` секунд: таймаут upstream = timeout + запас."""
+        """getUpdates держит соединение до `timeout` секунд: таймаут upstream = timeout + запас.
+
+        Bot API принимает и JSON, и `application/x-www-form-urlencoded`: при form-теле
+        параметр не находился, и long polling обрывался таймаутом по умолчанию.
+        """
         if api_name != "getUpdates":
             return None
-        poll = 0
-        if body:
-            try:
-                value = json.loads(body.decode("utf-8")).get("timeout", 0)
-            except (ValueError, AttributeError):
-                value = 0
-            if isinstance(value, int) and not isinstance(value, bool):
-                poll = max(0, min(value, MAX_POLL_SECONDS))
-        return poll + POLL_MARGIN
+        return _poll_seconds(body) + POLL_MARGIN
 
     def _leaks(self, text: str) -> bool:
         # Только полный токен: secret part входит в него как подстрока, а отдельная проверка

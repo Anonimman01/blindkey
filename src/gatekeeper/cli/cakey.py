@@ -12,6 +12,7 @@ import os
 import stat
 from pathlib import Path
 
+from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from gatekeeper.core.errors import GatekeeperError
@@ -41,6 +42,19 @@ def read_passphrase(args) -> bytes | None:
         return value.encode("utf-8")
     value = os.environ.get(ENV_PASSPHRASE, "")
     return value.encode("utf-8") if value else None
+
+
+def load_matching_ca_key(path: str | os.PathLike, passphrase: bytes | None,
+                         ca_cert: x509.Certificate) -> ec.EllipticCurvePrivateKey:
+    """Загрузить `ca.key` и убедиться, что он относится к `ca.pem` (issue #7).
+
+    Ключ от другого CA выпускал бы сертификаты с именем издателя из `ca.pem`, но подписанные
+    чужим ключом: клиент получил бы пакет, который шлюз никогда не примет.
+    """
+    key = load_ca_key(path, passphrase)
+    if not ca.key_matches_cert(key, ca_cert):
+        raise CaKeyError("this CA key does not match ca.pem")
+    return key
 
 
 def load_ca_key(path: str | os.PathLike, passphrase: bytes | None) -> ec.EllipticCurvePrivateKey:

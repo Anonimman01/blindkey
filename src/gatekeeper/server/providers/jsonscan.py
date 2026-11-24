@@ -112,7 +112,9 @@ def response_must_be_blocked(resp: UpstreamResponse, secrets: tuple[str, ...],
         return False  # пустое тело (204 и т. п.): скрывать нечего
     if "ndjson" in ct:
         # NDJSON: каждая строка обязана быть корректным JSON без утечки (fail closed, X-02).
-        for raw_line in text.splitlines():
+        # Делим только по `\n`: splitlines() режет ещё на U+2028, \x85, \v и \f, а они
+        # могут законно стоять внутри JSON-строки — запись развалилась бы на куски.
+        for raw_line in text.split("\n"):
             line = raw_line.strip()
             if not line:
                 continue
@@ -139,7 +141,7 @@ def response_must_be_blocked(resp: UpstreamResponse, secrets: tuple[str, ...],
             # надёжно проверить его нельзя — блокируем (fail closed).
             return True
         # Не-JSON Content-Type: отдельные строки всё же могут быть JSON.
-        for line in text.splitlines():
+        for line in text.split("\n"):
             line = line.strip()
             if line[:1] in ("{", "[") and _parsed_leaks(line, leaks):
                 return True

@@ -9,6 +9,7 @@ listen_port = 8443
 # audit_max_bytes = 67108864  # 64 МиБ: при переполнении журнал начинает новый сегмент (0 = без ротации)
 # audit_keep = 10          # сколько прошлых сегментов audit.log.<ts> хранить
 # max_total_response_bytes = 268435456  # 256 МиБ: общий потолок памяти под ответы upstream
+# max_handshaking_per_ip = 3  # одновременных TLS-рукопожатий с одного IP (слот только на рукопожатие)
 
 [provider]
 name = "telegram"
@@ -39,6 +40,9 @@ rate_per_sec = 5.0          # запросов в секунду на клиен
 burst = 10
 daily_budget = 10000        # запросов в сутки (UTC) на клиента
 max_body_bytes = 1048576    # 1 МБ; большие загрузки (sendDocument) пока не пройдут
+# max_json_body_bytes = 262144  # потолок разбора JSON-тела (подтверждаемые методы — только JSON)
+# header_timeout = 10.0       # секунд на заголовки запроса
+# body_timeout = 30.0         # секунд на тело запроса
 decoy_ban_seconds = 3600    # бан IP, с которого использовали приманку
 
 [anomaly]

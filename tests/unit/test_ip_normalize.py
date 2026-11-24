@@ -39,6 +39,28 @@ def test_ban_is_shared_both_ways():
     assert not bans.is_banned(MAPPED)
 
 
+def test_zone_is_not_part_of_the_key():
+    assert normalize_ip("fe80::1%eth0") == normalize_ip("fe80::1%wlan0") == "fe80::/64"
+    assert normalize_ip("::ffff:1.2.3.4%eth0") == V4
+
+
+def test_legacy_ban_keys_are_migrated_on_start(tmp_path):
+    """Баны из state.db под старым ключом (`::ffff:…`, зона) должны снова срабатывать."""
+    from gatekeeper.server.state import StateStore
+
+    store = StateStore(tmp_path / "state.db")
+    now = 1_000_000
+    store.set_ban("::ffff:1.2.3.4", now + 600)
+    store.set_ban("fe80::1%eth0", now + 600)
+    try:
+        bans = IpBanList(lambda: now, store=store)
+        assert bans.is_banned("1.2.3.4")
+        assert bans.is_banned("fe80::abcd")
+        assert set(store.load_bans(now)) == {"1.2.3.4", "fe80::/64"}
+    finally:
+        store.close()
+
+
 def test_rate_limiter_key_is_shared():
     rl = RateLimiter(1.0, 1, clock=lambda: 0.0)
     assert rl.allow(normalize_ip(V4))
