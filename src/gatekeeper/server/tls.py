@@ -5,6 +5,8 @@ import asyncio
 import ssl
 from pathlib import Path
 
+from gatekeeper.core.errors import GatekeeperError
+
 
 def build_server_context(ca_pem: str | Path, cert_pem: str | Path, key_pem: str | Path) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -12,7 +14,14 @@ def build_server_context(ca_pem: str | Path, cert_pem: str | Path, key_pem: str 
     ctx.maximum_version = ssl.TLSVersion.TLSv1_3
     ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.load_verify_locations(cafile=str(ca_pem))  # системные корни НЕ загружаем
-    ctx.load_cert_chain(str(cert_pem), str(key_pem))
+    try:
+        ctx.load_cert_chain(str(cert_pem), str(key_pem))
+    except ssl.SSLError as exc:
+        # Типичная причина: renew-server оборвали между записью сертификата и ключа (issue #8).
+        raise GatekeeperError(
+            "cannot load the server certificate and key (a mismatched pair, for example after "
+            "an interrupted renew-server): run `gatekeeper renew-server` again with the CA key"
+        ) from exc
     return ctx
 
 

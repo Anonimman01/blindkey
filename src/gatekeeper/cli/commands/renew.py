@@ -2,17 +2,19 @@
 
 Права (allow) и статус сохраняются. Старый сертификат перестаёт работать сразу,
 новый пакет записывается в --out. Отозванного клиента продлить нельзя.
-Если пакет не удалось записать, реестр возвращается к прежним значениям: иначе клиент
-потерял бы старый сертификат, не получив нового.
+
+Порядок (issue #9): сначала пакет на диск, потом реестр. Пока реестр не изменён, старый
+сертификат клиента остаётся рабочим, поэтому сбой записи пакета ничего не ломает и откатывать
+реестр не нужно. Если сбой случился уже при записи реестра, новый пакет удаляется.
 """
 from __future__ import annotations
 
 import secrets as _secrets
-from contextlib import suppress
 from pathlib import Path
 
 from gatekeeper.cli import output
-from gatekeeper.cli.cakey import load_ca_key, read_passphrase
+from gatekeeper.cli.bundle import discard_bundle, write_bundle
+from gatekeeper.cli.cakey import load_matching_ca_key, read_passphrase
 from gatekeeper.core import constants
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.events import EventType
@@ -36,7 +38,7 @@ def run(args, layout: Layout) -> int:
     try:
         passphrase = read_passphrase(args)
         ca_cert = ca.load_cert_pem(layout.ca_cert.read_bytes())
-        ca_key = load_ca_key(Path(args.ca_key), passphrase)
+        ca_key = load_matching_ca_key(Path(args.ca_key), passphrase, ca_cert)
         reg = Registry(layout.clients_file)
         old = reg.load().get(args.id)
         if not isinstance(old, dict):
@@ -46,27 +48,27 @@ def run(args, layout: Layout) -> int:
         cert, key = ca.issue_client_cert(ca_cert, ca_key, args.id, days=args.days)
         fp = cert_fingerprint(cert)
         master = _secrets.token_bytes(constants.MASTER_SECRET_LEN)
-        reg.renew(args.id, fingerprint=fp, master_secret=master.hex(),
-                  expires=unix_now() + args.days * 86400)
     except (GatekeeperError, OSError) as exc:
         output.error(str(exc))
         return 1
 
+    out_existed = out.exists()
     try:
-        out.mkdir(mode=0o700, parents=True, exist_ok=True)
-        ca.write_private_file(out / "ca.pem", ca.cert_to_pem(ca_cert))
-        ca.write_private_file(out / "client.pem", ca.cert_to_pem(cert))
-        ca.write_private_file(out / "client.key", ca.key_to_pem(key))
-        ca.write_private_file(out / "master.secret", master.hex().encode("ascii"))
+        write_bundle(out, {
+            "ca.pem": ca.cert_to_pem(ca_cert),
+            "client.pem": ca.cert_to_pem(cert),
+            "client.key": ca.key_to_pem(key),
+            "master.secret": master.hex().encode("ascii"),
+        })
+    except (GatekeeperError, OSError) as exc:  # write_bundle сам откатил свою запись
+        output.error(f"cannot write the new bundle; the registry was not changed: {exc}")
+        return 1
+    try:
+        reg.renew(args.id, fingerprint=fp, master_secret=master.hex(),
+                  expires=unix_now() + args.days * 86400)
     except (GatekeeperError, OSError) as exc:
-        # Откат: без пакета новый отпечаток в реестре сделал бы клиента недоступным.
-        old_expires = old.get("expires")
-        rollback_expires = old_expires if isinstance(old_expires, int) else 0
-        with suppress(GatekeeperError, OSError):
-            reg.renew(args.id, fingerprint=str(old.get("fingerprint")),
-                      master_secret=str(old.get("master_secret")),
-                      expires=rollback_expires)
-        output.error(f"cannot write the new bundle; the registry was rolled back: {exc}")
+        discard_bundle(out, out_existed)  # реестр не принял изменение: новый пакет не нужен
+        output.error(f"cannot update the client registry; the new bundle was removed: {exc}")
         return 1
 
     try:

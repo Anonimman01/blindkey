@@ -5,7 +5,7 @@ import secrets as _secrets
 from pathlib import Path
 
 from gatekeeper.cli import output
-from gatekeeper.cli.cakey import load_ca_key, read_passphrase
+from gatekeeper.cli.cakey import load_matching_ca_key, read_passphrase
 from gatekeeper.core import constants
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.signing import is_valid_client_id
@@ -33,7 +33,7 @@ def run(args, layout: Layout) -> int:
             return 1
         passphrase = read_passphrase(args)
         ca_cert = ca.load_cert_pem(layout.ca_cert.read_bytes())
-        ca_key = load_ca_key(Path(args.ca_key), passphrase)
+        ca_key = load_matching_ca_key(Path(args.ca_key), passphrase, ca_cert)
         cert, key = ca.issue_client_cert(ca_cert, ca_key, args.name, days=args.days)
         fp = cert_fingerprint(cert)
         DecoyStore(layout.decoys_file).add(args.name, fp, unix_now(), args.hint)

@@ -29,19 +29,44 @@ def normalize_ip(ip: str) -> str:
     приходит с двойного стека и обязан совпадать с обычным `1.2.3.4`, иначе лимиты и баны
     обходятся сменой формы записи одного и того же адреса.
     """
+    # Зона (`fe80::1%eth0`) к адресу не относится: один хост с разных интерфейсов должен
+    # давать один ключ, иначе бан обходится сменой зоны в записи адреса.
+    zone_free = ip.split("%", 1)[0] if "%" in ip else ip
     try:
-        addr = ipaddress.ip_address(ip)
+        addr = ipaddress.ip_address(zone_free)
     except ValueError:
         return ip
     if addr.version == 6:
         mapped = addr.ipv4_mapped
         if mapped is not None:
             return str(mapped)
-        try:
-            return str(ipaddress.ip_network(f"{addr}/64", strict=False))
-        except ValueError:  # адрес со scope-id (fe80::1%eth0): ключ как есть
-            return ip
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
     return str(addr)
+
+
+def _merge_bans(loaded: dict[str, int]) -> dict[str, int]:
+    """Свести ключи, сохранённые прежними версиями, к каноническому виду.
+
+    В state.db могли остаться `::ffff:1.2.3.4`, полная форма IPv6 или адрес с зоной.
+    `is_banned` ищет канонический ключ, поэтому без миграции такие баны не срабатывали.
+    """
+    merged: dict[str, int] = {}
+    for ip, until in loaded.items():
+        key = normalize_ip(ip)
+        if until > merged.get(key, 0):
+            merged[key] = until
+    return merged
+
+
+def _migrate_bans(store: StateStore, loaded: dict[str, int],
+                  canonical: dict[str, int]) -> None:
+    """Переписать баны из state.db под каноническим ключом (один раз, при старте)."""
+    for ip in loaded:
+        key = normalize_ip(ip)
+        if key == ip:
+            continue
+        store.set_ban(key, canonical[key])
+        store.del_ban(ip)
 
 
 class IpBanList:
@@ -51,7 +76,10 @@ class IpBanList:
         self._lock = threading.Lock()
         self._store = store
         self._max = max_entries
-        self._until: dict[str, int] = store.load_bans(clock()) if store else {}
+        loaded = store.load_bans(clock()) if store else {}
+        self._until = _merge_bans(loaded)
+        if store is not None:
+            _migrate_bans(store, loaded, self._until)
 
     def ban(self, ip: str, seconds: int) -> None:
         if seconds <= 0:

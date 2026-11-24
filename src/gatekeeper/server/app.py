@@ -98,7 +98,8 @@ class GatekeeperApp:
     def __init__(self, *, pipeline: Pipeline, bans: IpBanList, limiter: ConnectionLimiter,
                  audit: AuditChain, http_limits: HttpLimits, ssl_ctx: ssl.SSLContext,
                  host: str, port: int, metrics: Metrics | None = None,
-                 metrics_socket: str | None = None, max_handshaking_per_ip: int = 3) -> None:
+                 metrics_socket: str | None = None, max_handshaking_per_ip: int = 3,
+                 closers: tuple[Callable[[], None], ...] = ()) -> None:
         self.metrics, self.metrics_socket = metrics, metrics_socket
         self.pipeline, self.bans, self.limiter, self.audit = pipeline, bans, limiter, audit
         self.http_limits, self.ssl_ctx, self.host, self.port = http_limits, ssl_ctx, host, port
@@ -111,6 +112,8 @@ class GatekeeperApp:
         # Слот рукопожатия берётся ДО start_tls и держится до его конца (успех или сбой):
         # один источник не может открыть много полуготовых рукопожатий (X-04).
         self._handshake_slots = _HandshakeSlots(limiter.max_total, max_handshaking_per_ip)
+        # Что закрыть при штатной остановке (state.db: WAL сводится в основной файл).
+        self._closers = list(closers)
 
     async def _handshake(self, writer: asyncio.StreamWriter, ip: str) -> bool:
         """mTLS-рукопожатие. Неудача пишется в журнал (с лимитом на IP) и закрывает соединение."""
@@ -236,6 +239,20 @@ class GatekeeperApp:
                 with contextlib.suppress(OSError):
                     _unlink_if_socket(self.metrics_socket)  # type: ignore[arg-type]
             await self._cancel_conn_tasks()
+            await self._close_resources()
+
+    async def _close_resources(self) -> None:
+        """Закрыть state.db и прочие ресурсы: остановка службы не должна оставлять WAL.
+
+        Без этого `systemctl restart` оставлял `state.db-wal` незавершённым, а sqlite
+        сводил его при следующем открытии; при нехватке места на разделе это уже поздно.
+        """
+        while self._closers:
+            close = self._closers.pop()  # обратный порядок создания
+            try:
+                await asyncio.to_thread(close)
+            except Exception:  # уборка при остановке не должна мешать выходу
+                continue
 
     def _gauges(self) -> dict[str, float]:
         return {"gk_connections": float(self.limiter.total),
@@ -379,4 +396,5 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
         ssl_ctx=build_server_context(layout.ca_cert, layout.server_cert, layout.server_key),
         host=cfg.listen_host, port=cfg.listen_port,
         metrics=metrics, metrics_socket=cfg.metrics_socket,
-        max_handshaking_per_ip=cfg.max_handshaking_per_ip)
+        max_handshaking_per_ip=cfg.max_handshaking_per_ip,
+        closers=(store.close,) if store is not None else ())

@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from gatekeeper.server.providers.base import UpstreamRequest
+from gatekeeper.server.providers.base import UpstreamRequest, UpstreamResponse
 from gatekeeper.server.providers.telegram import TelegramProvider
 from gatekeeper.server.upstream import ResponseBudget, Upstream, UpstreamError
 
@@ -287,6 +287,30 @@ def test_concurrent_reservations_never_exceed_the_budget():
         asyncio.run(scenario())
     finally:
         srv.close()
+
+
+def test_filter_reservation_is_clamped_to_the_remaining_budget():
+    """Тело уже оплачено: остаток бюджета меньше оценки разбора, но фильтр не отказывает."""
+    body = b'{"k":"' + b"x" * 100 + b'"}'
+    budget = ResponseBudget(len(body) * 3)
+    up = Upstream("127.0.0.1", 1, use_tls=False, budget=budget)
+    resp = UpstreamResponse(200, "application/json", body)
+    assert budget.reserve(len(body))          # столько держит fetch (в бою — hold=True)
+    assert up.begin_filter(resp) is True      # 7x тела больше свободного места
+    assert budget.used == budget.max_bytes    # резерв ограничен остатком и не превышен
+    up.release_response(resp)                 # снимает только свою долю (остаток)
+    assert budget.used == len(body)
+    budget.release(len(body))
+    assert budget.used == 0
+
+
+def test_filter_refuses_only_when_budget_is_exhausted():
+    body = b'{"k":"x"}'
+    budget = ResponseBudget(len(body) * 7)
+    up = Upstream("127.0.0.1", 1, use_tls=False, budget=budget)
+    resp = UpstreamResponse(200, "application/json", body)
+    assert budget.reserve(budget.max_bytes)
+    assert up.begin_filter(resp) is False     # свободного места нет вовсе
 
 
 def test_reservation_is_released_when_close_hangs(monkeypatch):

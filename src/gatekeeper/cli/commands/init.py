@@ -10,13 +10,14 @@
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
 from cryptography import x509
 
 from gatekeeper.cli import output
-from gatekeeper.cli.cakey import load_ca_key, read_passphrase
+from gatekeeper.cli.cakey import load_matching_ca_key, read_passphrase
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.events import EventType
 from gatekeeper.pki import ca
@@ -88,8 +89,16 @@ def run(args, layout: Layout) -> int:
                 output.error(f"refusing to overwrite {ca_key_out}")
                 return 1
             ca_cert, ca_key = ca.create_ca()
-            ca.write_private_file(layout.ca_cert, ca.cert_to_pem(ca_cert))
+            # Ключ первым (issue #10): `ca.pem` без ключа это CA, которым уже нельзя выпускать
+            # сертификаты и который нельзя восстановить. Если не удалось записать сам `ca.pem`,
+            # только что созданный ключ убираем, и повторный `init` начинает с чистого места.
             ca.write_private_file(ca_key_out, ca.key_to_pem(ca_key, passphrase))
+            try:
+                ca.write_private_file(layout.ca_cert, ca.cert_to_pem(ca_cert))
+            except (GatekeeperError, OSError):
+                with contextlib.suppress(OSError):
+                    ca_key_out.unlink()
+                raise
             created.append("ca")
 
         if not (layout.server_cert.exists() and layout.server_key.exists()):
@@ -100,7 +109,7 @@ def run(args, layout: Layout) -> int:
                         "server certificate is missing and the CA key is not available: "
                         f"pass it with --ca-key (or put it at {ca_key_out})")
                     return 1
-                ca_key = load_ca_key(key_path, passphrase)
+                ca_key = load_matching_ca_key(key_path, passphrase, ca_cert)
             issue_hosts = hosts or _hosts_from_cert(layout.server_cert)
             if not issue_hosts:
                 output.error("at least one --host is required to issue the server certificate")

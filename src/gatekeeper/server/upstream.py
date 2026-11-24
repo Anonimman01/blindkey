@@ -53,6 +53,12 @@ class ResponseBudget:
         with self._lock:
             return self._used
 
+    @property
+    def available(self) -> int:
+        """Сколько байт ещё можно зарезервировать (0 = бюджет исчерпан)."""
+        with self._lock:
+            return max(0, self.max_bytes - self._used)
+
 
 def _safe_content_type(raw: bytes | None) -> str | None:
     if raw is None or len(raw) > 200:
@@ -166,6 +172,12 @@ class Upstream:
         extra = len(resp.body) * (_JSON_FILTER_FACTOR - 1)
         if extra <= 0:
             return True
+        # Тело уже оплачено при чтении; оценка разбора может быть больше остатка бюджета.
+        # Тогда резервируем остаток: отказывать ответу, которому не хватило «на разбор»,
+        # значит терять уже полученный результат при том же потолке памяти.
+        extra = min(extra, self._budget.available)
+        if extra <= 0:
+            return False
         if not self._budget.reserve(extra):
             return False
         with self._held_lock:

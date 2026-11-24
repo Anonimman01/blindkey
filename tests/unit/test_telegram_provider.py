@@ -51,6 +51,16 @@ def test_download_file_requires_post_and_json():
         prov().build_request("downloadFile", "POST", b"not json", "application/json")
 
 
+def test_get_updates_form_body_timeout_is_honoured():
+    p = prov()
+    assert p.upstream_timeout("getUpdates", b"timeout=45&offset=7") == 45 + 10
+    assert p.upstream_timeout("getUpdates", b"offset=7") == 10
+    assert p.upstream_timeout("getUpdates", b"timeout=9999") == 50 + 10  # потолок Bot API
+    assert p.upstream_timeout("getUpdates", b"timeout=abc") == 10
+    assert p.upstream_timeout("getUpdates", b'{"timeout": 20}') == 20 + 10
+    assert p.upstream_timeout("getMe", b"timeout=45") is None
+
+
 def test_response_with_token_blocked():
     for body in (TOKEN.encode(), b'{"u":"/bot' + TOKEN.encode() + b'/x"}'):
         assert prov().filter_response(UpstreamResponse(200, "application/json", body)) is None

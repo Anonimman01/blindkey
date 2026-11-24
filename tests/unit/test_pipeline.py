@@ -107,6 +107,16 @@ def test_tampered_body_rejected(tmp_path):
     assert call(env, bad)[0] == 403 and not env.up.calls
 
 
+def test_rejected_body_does_not_spend_daily_budget(tmp_path):
+    """Тело отвергнуто до upstream: суточная квота не должна уменьшаться."""
+    env = make_env(tmp_path)
+    req = make_req(env.fp)
+    bad = ParsedRequest(req.method, req.target,
+                        {**req.headers, "content-type": "text/html"}, req.body)
+    assert call(env, bad)[0] == 400 and not env.up.calls
+    assert env.p.budget.used("alice") == 0
+
+
 def test_replay(tmp_path):
     env = make_env(tmp_path)
     req = make_req(env.fp)

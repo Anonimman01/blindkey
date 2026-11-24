@@ -175,8 +175,14 @@ class Approvals:
 
     # ---- шлюз ----
     def request(self, client_id: str, http_method: str, api: str, body: bytes,
-                preview: str, ip: str, content_type: str = "") -> RequestResult:
-        """Подтверждение есть: израсходовать его (approved). Иначе завести или найти заявку."""
+                preview: str, ip: str, content_type: str = "", *,
+                consume: bool = True) -> RequestResult:
+        """Подтверждение есть: approved. Иначе завести или найти заявку.
+
+        `consume=True` (по умолчанию): подтверждение при этом расходуется. Шлюз вызывает с
+        `consume=False`, прогоняет остальные проверки и расходует подтверждение методом
+        `consume()` непосредственно перед обращением к upstream (issue #11).
+        """
         key = request_key(client_id, http_method, api, body, content_type)
         rid = key[:ID_LEN]
         with self._locked():
@@ -184,8 +190,11 @@ class Approvals:
             changed = self._purge(items) or dropped > 0
             entry = items.get(key)
             if entry is not None and entry.get("status") == APPROVED:
-                del items[key]
-                self._save(items)
+                if consume:
+                    del items[key]
+                    self._save(items)
+                elif changed:
+                    self._save(items)
                 return RequestResult("approved", rid)
             if entry is not None:
                 if changed:
@@ -206,6 +215,23 @@ class Approvals:
             }
             self._save(items)
             return RequestResult("new", rid)
+
+    def consume(self, client_id: str, http_method: str, api: str, body: bytes,
+                content_type: str = "") -> bool:
+        """Израсходовать подтверждение. False, если его уже нет (истекло или взято параллельным
+        запросом): одно подтверждение разрешает ровно одно выполнение."""
+        key = request_key(client_id, http_method, api, body, content_type)
+        with self._locked():
+            items, dropped = self._read()
+            changed = self._purge(items) or dropped > 0
+            entry = items.get(key)
+            if entry is None or entry.get("status") != APPROVED:
+                if changed:
+                    self._save(items)
+                return False
+            del items[key]
+            self._save(items)
+            return True
 
     # ---- оператор ----
     def list_items(self) -> list[tuple[str, dict]]:

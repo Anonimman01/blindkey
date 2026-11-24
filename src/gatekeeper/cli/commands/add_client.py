@@ -10,7 +10,8 @@ from contextlib import suppress
 from pathlib import Path
 
 from gatekeeper.cli import output
-from gatekeeper.cli.cakey import load_ca_key, read_passphrase
+from gatekeeper.cli.bundle import discard_bundle, write_bundle
+from gatekeeper.cli.cakey import load_matching_ca_key, read_passphrase
 from gatekeeper.core import constants
 from gatekeeper.core.errors import GatekeeperError, PolicyError
 from gatekeeper.core.events import EventType
@@ -35,22 +36,6 @@ def _valid_rule(rule: str) -> bool:
     return True
 
 
-def _write_bundle(out: Path, files: dict[str, bytes]) -> list[Path]:
-    written: list[Path] = []
-    out.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        for name, data in files.items():
-            path = out / name
-            ca.write_private_file(path, data)
-            written.append(path)
-    except (GatekeeperError, OSError):
-        for path in written:
-            with suppress(OSError):
-                path.unlink()
-        raise
-    return written
-
-
 def run(args, layout: Layout) -> int:
     if not is_valid_client_id(args.id):
         output.error("invalid client id (letters/digits/._-, must start with letter or digit, max 64)")
@@ -71,7 +56,7 @@ def run(args, layout: Layout) -> int:
     try:
         passphrase = read_passphrase(args)
         ca_cert = ca.load_cert_pem(layout.ca_cert.read_bytes())
-        ca_key = load_ca_key(Path(args.ca_key), passphrase)
+        ca_key = load_matching_ca_key(Path(args.ca_key), passphrase, ca_cert)
         reg = Registry(layout.clients_file)
         if args.id in reg.load():
             raise RegistryError(f"client already exists: {args.id}")
@@ -95,7 +80,7 @@ def run(args, layout: Layout) -> int:
         entry["provider"] = provider  # без поля клиент работает с первым провайдером шлюза
     # Пакет — до реестра (см. docstring): при сбое клиента в реестре ещё нет.
     try:
-        _write_bundle(out, {
+        write_bundle(out, {
             "ca.pem": ca.cert_to_pem(ca_cert),
             "client.pem": ca.cert_to_pem(cert),
             "client.key": ca.key_to_pem(key),
@@ -110,12 +95,7 @@ def run(args, layout: Layout) -> int:
     try:
         reg.add(args.id, entry)
     except GatekeeperError as exc:
-        for name in ("ca.pem", "client.pem", "client.key", "master.secret"):
-            with suppress(OSError):
-                (out / name).unlink()
-        if not out_existed:
-            with suppress(OSError):
-                out.rmdir()
+        discard_bundle(out, out_existed)
         output.error(str(exc))
         return 1
 
