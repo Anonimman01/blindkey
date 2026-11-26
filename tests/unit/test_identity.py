@@ -86,7 +86,7 @@ def test_failed_reload_is_retried_after_repair_without_stat_change(tmp_path):
     stat = os.stat(path)
 
     path.write_bytes(b"!" * len(good))  # битый JSON того же размера
-    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
     broken = os.stat(path)
     assert store.identify(der(cert)).reason == "unknown"  # fail closed
 
