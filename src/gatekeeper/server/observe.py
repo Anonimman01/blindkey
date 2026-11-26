@@ -48,12 +48,21 @@ class Metrics:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._counters: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+        # Гейджи с метками (например заполненность кэша на клиента): в отличие от
+        # counters они не растут, а перезаписываются при каждом scrape.
+        self._gauges: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
         self._started = time.monotonic()
 
     def inc(self, name: str, value: float = 1.0, **labels: object) -> None:
         key = (name, tuple(sorted((k, str(v)) for k, v in labels.items())))
         with self._lock:
             self._counters[key] = self._counters.get(key, 0.0) + value
+
+    def gauge(self, name: str, value: float, **labels: object) -> None:
+        """Установить значение гейджа с метками (0/1/доли, а не счётчик)."""
+        key = (name, tuple(sorted((k, str(v)) for k, v in labels.items())))
+        with self._lock:
+            self._gauges[key] = float(value)
 
     def observe(self, name: str, value: float, buckets: tuple[float, ...] = SECONDS_BUCKETS,
                 **labels: object) -> None:
@@ -75,8 +84,9 @@ class Metrics:
     def render(self, gauges: dict[str, float] | None = None) -> str:
         with self._lock:
             items = sorted(self._counters.items())
+            labeled = sorted(self._gauges.items())
         lines = []
-        for (name, labels), val in items:
+        for (name, labels), val in items + labeled:
             lab = ",".join(f'{k}="{_esc(v)}"' for k, v in labels)
             lines.append(f"{name}{{{lab}}} {val:g}" if lab else f"{name} {val:g}")
         merged = {"gk_uptime_seconds": time.monotonic() - self._started, **(gauges or {})}

@@ -13,12 +13,14 @@
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gatekeeper.core.errors import AuditError
 from gatekeeper.core.events import EventType, Severity
@@ -27,8 +29,12 @@ from gatekeeper.core.timeutil import unix_now
 from gatekeeper.server.audit.repair import TailRepair, truncate_incomplete_tail
 from gatekeeper.server.audit.sink import FileSink
 
+if TYPE_CHECKING:  # rotate импортирует chain лениво: только для аннотации
+    from gatekeeper.server.audit.rotate import SegmentStart
+
 GENESIS_HASH = "0" * 64
 RECORD_KEYS = frozenset({"seq", "ts", "type", "sev", "data", "prev", "hash"})
+_ARCHIVE_TIMEOUT = 30.0  # потолок на внешнюю команду архивации
 
 
 def _dumps(obj: Any) -> bytes:
@@ -81,6 +87,7 @@ class AuditChain:
         repair_tail: bool = False,
         max_bytes: int = 0,
         keep: int = 10,
+        archive_command: tuple[str, ...] = (),
     ) -> None:
         from gatekeeper.server.audit.rotate import recover_pending_rotation
         from gatekeeper.server.audit.verify import verify_file  # избегаем цикла
@@ -102,6 +109,13 @@ class AuditChain:
         self._repair_tail = bool(repair_tail)
         self._max_bytes = int(max_bytes)
         self._keep = int(keep)
+        # Хук архивации: команда и её аргументы списком, без shell-интерполяции (A7).
+        self._archive_command = tuple(archive_command)
+        self._rotated: SegmentStart | None = None  # закрытый сегмент ждёт хука
+        # Защита от повторного входа: событие об ошибке хука само может перерасти лимит и
+        # вызвать ротацию. Без флага это была бы рекурсивная цепочка ротация -> хук ->
+        # ротация на маленьком audit_max_bytes.
+        self._archive_running = False
         self._pending_repair: TailRepair | None = None
         if verify_on_open:
             with sink.locked():
@@ -128,6 +142,14 @@ class AuditChain:
     @property
     def next_seq(self) -> int:
         return self._next_seq
+
+    @property
+    def head(self) -> tuple[int, str]:
+        """(seq, hash) последней записанной записи; seq = -1 для пустого журнала.
+
+        Нужен автоякорям (A8): якорь — это ровно голова цепочки в момент времени.
+        """
+        return self._next_seq - 1, self._last_hash
 
     def _inode_of(self) -> int | None:
         try:
@@ -187,6 +209,38 @@ class AuditChain:
         self._last_hash = res.last_hash
         self._offset = size
 
+    def _run_archive_hook(self, seg) -> None:
+        """Вызвать внешнюю команду архивации для закрытого сегмента (A7).
+
+        Команда получает два пути: сегмент и его `.head`. Она запускается списком
+        аргументов (shell=False), поэтому пути не интерпретируются оболочкой. Ошибка
+        хука не останавливает шлюз и не отменяет ротацию: она пишется как событие.
+        """
+        if seg.archive is None or seg.head is None or self._archive_running:
+            return
+        self._archive_running = True
+        reason: str | None = None
+        try:
+            completed = subprocess.run(  # список аргументов: shell не участвует
+                [*self._archive_command, str(seg.archive), str(seg.head)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=_ARCHIVE_TIMEOUT, check=False)
+            if completed.returncode != 0:
+                reason = f"exit_code_{completed.returncode}"
+        except subprocess.TimeoutExpired:
+            reason = "timeout"
+        except OSError as exc:  # нет файла, нет прав: только тип, без текста
+            reason = type(exc).__name__
+        try:
+            if reason is None:
+                return
+            with contextlib.suppress(Exception):  # журнал недоступен: ротация уже состоялась
+                self.append("audit_archive_failed",
+                            {"segment": seg.archive.name, "reason": reason},
+                            Severity.ALERT)
+        finally:
+            self._archive_running = False
+
     def append(
         self,
         event_type: EventType | str,
@@ -212,6 +266,15 @@ class AuditChain:
         with self._lock:
             if not item.done:  # иначе нас уже записал другой поток в своей пачке
                 self._flush()
+            if self._archive_running:
+                # Внутри хука: не углубляемся в рекурсию, ротация обработается следующим
+                # вызовом append из шлюза или CLI.
+                rotated = None
+            else:
+                rotated, self._rotated = self._rotated, None
+        # Хук — вне замка журнала: медленная внешняя команда не задерживает записи.
+        if rotated is not None and self._archive_command:
+            self._run_archive_hook(rotated)
         if item.error is not None:
             raise item.error
         assert item.result is not None
@@ -227,6 +290,7 @@ class AuditChain:
         self._next_seq, self._last_hash = seg.seq + 1, seg.hash
         self._offset = self._sink.size()
         self._inode = self._inode_of()
+        self._rotated = seg
 
     def _flush(self) -> None:
         """Под self._lock: записать все ожидающие записи одной пачкой."""

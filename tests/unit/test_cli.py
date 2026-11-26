@@ -159,16 +159,107 @@ def test_list_clients_survives_a_non_numeric_expiry(env, capsys):
     assert "b1" in listing and "expires invalid" in listing and "broken" in listing
 
 
-def test_freeze_applies_even_when_the_journal_is_broken(env, capsys):
-    """C-05: состояние меняется первым, оператор видит явное предупреждение."""
-    base, cfg, data, cakey, tmp = env
-    assert main([*base, "add-client", "--id", "b1", "--ca-key", str(cakey),
-                 "--out", str(tmp / "b1")]) == 0
+def _client(env, cid="b1"):
+    base, _cfg, _data, cakey, tmp = env
+    assert main([*base, "add-client", "--id", cid, "--ca-key", str(cakey),
+                 "--out", str(tmp / cid)]) == 0
+    return base
+
+
+def _status(cfg, cid="b1"):
+    return json.loads((cfg / "clients.json").read_text())["clients"][cid]["status"]
+
+
+def test_state_commands_do_not_change_state_without_the_journal(env, capsys):
+    """A3: сначала журнал, потом состояние. Без журнала команда только сообщает об ошибке."""
+    base = _client(env)
+    _base, cfg, data, _cakey, _tmp = env
     (data / "audit" / "audit.log").write_bytes(b"garbage\n")
+    capsys.readouterr()
+    assert main([*base, "freeze", "--id", "b1"]) == 1
+    assert _status(cfg) == "active"
+    err = capsys.readouterr().err
+    assert "audit log is unavailable" in err and "was not changed" in err
+
+
+def test_unfreeze_does_not_change_state_without_the_journal(env, capsys):
+    base = _client(env)
+    _base, cfg, data, _cakey, _tmp = env
     assert main([*base, "freeze", "--id", "b1"]) == 0
-    assert json.loads((cfg / "clients.json").read_text())["clients"]["b1"]["status"] == "frozen"
+    (data / "audit" / "audit.log").write_bytes(b"garbage\n")
+    capsys.readouterr()
+    assert main([*base, "unfreeze", "--id", "b1"]) == 1
+    assert _status(cfg) == "frozen"
+
+
+def test_revoke_does_not_change_state_without_the_journal(env, capsys):
+    base = _client(env)
+    _base, cfg, data, _cakey, _tmp = env
+    (data / "audit" / "audit.log").write_bytes(b"garbage\n")
+    capsys.readouterr()
+    assert main([*base, "revoke", "--id", "b1"]) == 1
+    assert _status(cfg) == "active"
+    assert "--force-no-audit" in capsys.readouterr().out  # подсказка про аварийный режим
+
+
+def test_state_change_is_recorded_in_the_journal(env):
+    """A3: успешная команда оставляет запись, журнал остаётся целым."""
+    base = _client(env)
+    _base, cfg, data, _cakey, _tmp = env
+    assert main([*base, "freeze", "--id", "b1"]) == 0
+    assert _status(cfg) == "frozen"
+    log = (data / "audit" / "audit.log").read_text()
+    assert "client_frozen" in log and verify_file(data / "audit" / "audit.log").ok
+
+
+def test_unknown_client_writes_no_state_event(env, capsys):
+    """Неизвестный id не меняет состояние и не оставляет в журнале ложный client_frozen."""
+    base = _client(env)
+    _base, _cfg, data, _cakey, _tmp = env
+    log = data / "audit" / "audit.log"
+    before = log.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert main([*base, "freeze", "--id", "nope"]) == 1
+    assert "unknown client" in capsys.readouterr().err
+    assert log.read_text(encoding="utf-8") == before
+
+
+def test_revoke_force_no_audit_works_with_a_broken_journal(env, capsys):
+    """A3: аварийный отзыв проходит без журнала и громко об этом предупреждает."""
+    base = _client(env)
+    _base, cfg, data, _cakey, _tmp = env
+    (data / "audit" / "audit.log").write_bytes(b"garbage\n")
+    capsys.readouterr()
+    assert main([*base, "revoke", "--id", "b1", "--force-no-audit"]) == 0
+    assert _status(cfg) == "revoked"
     out = capsys.readouterr()
-    assert "not updated" in (out.out + out.err)
+    assert "WITHOUT an audit record" in out.err and "WARNING" in out.err
+
+
+def test_revoke_force_no_audit_still_writes_the_journal_when_it_works(env):
+    base = _client(env)
+    _base, cfg, data, _cakey, _tmp = env
+    assert main([*base, "revoke", "--id", "b1", "--force-no-audit"]) == 0
+    assert _status(cfg) == "revoked"
+    assert "client_revoked" in (data / "audit" / "audit.log").read_text()
+
+
+def test_force_no_audit_exists_only_for_revoke(env):
+    base = _client(env)
+    with pytest.raises(SystemExit):
+        main([*base, "freeze", "--id", "b1", "--force-no-audit"])
+
+
+def test_failed_state_change_after_the_journal_is_an_explicit_abort(env, capsys):
+    """A3: журнал записан, изменение состояния не удалось — явный итог «не выполнено»."""
+    base = _client(env)
+    _base, _cfg, data, _cakey, _tmp = env
+    assert main([*base, "freeze", "--id", "b1"]) == 0
+    capsys.readouterr()
+    assert main([*base, "freeze", "--id", "b1"]) == 1        # frozen -> frozen невозможно
+    log = (data / "audit" / "audit.log").read_text()
+    assert "request_aborted" in log and "state_change_failed" in log
+    assert "the state was not changed" in capsys.readouterr().err
 
 
 def test_approve_writes_the_journal_first(env):

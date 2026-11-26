@@ -220,6 +220,21 @@ def load_cert_pem(pem: bytes) -> x509.Certificate:
         raise PkiError("invalid PEM certificate") from exc
 
 
+def key_is_encrypted(pem: bytes) -> bool:
+    """Зашифрован ли приватный ключ парольной фразой (B3).
+
+    Формат не меняется: проверка только читает файл. `True` значит, что без фразы ключ
+    не использовать, а фраза где-то лежит (--ca-key-pass-file или окружение).
+    """
+    try:
+        serialization.load_pem_private_key(pem, password=None)
+    except TypeError:
+        return True   # cryptography: ключ зашифрован, а пароль не передан
+    except ValueError as exc:
+        raise PkiError("cannot parse the private key") from exc
+    return False
+
+
 def load_key_pem(pem: bytes, password: bytes | None = None) -> ec.EllipticCurvePrivateKey:
     try:
         key = serialization.load_pem_private_key(pem, password)

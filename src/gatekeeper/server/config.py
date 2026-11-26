@@ -67,6 +67,9 @@ class Config:
     metrics_socket: str | None = None
     # Хранить nonce, суточный бюджет, баны и счётчики аномалий в SQLite (переживают рестарт).
     persist_state: bool = True
+    # PRAGMA synchronous для state.db: "normal" (по умолчанию, быстрее) или "full" (fsync
+    # каждой транзакции). Журнал аудита пишется с fsync в обоих режимах.
+    state_synchronous: str = "normal"
     provider: str = "telegram"
     secret_env: str | None = "GATEKEEPER_UPSTREAM_TOKEN"
     secret_file: str | None = None
@@ -81,6 +84,14 @@ class Config:
     # Ротация журнала: 0 = выключена (журнал растёт без границ).
     audit_max_bytes: int = 64 * 1024 * 1024
     audit_keep: int = 10  # сколько прошлых сегментов журнала хранить
+    # Хук архивации закрытого сегмента: команда и аргументы списком (без shell).
+    # Пусто = выключено; ошибка хука не останавливает шлюз, а пишется событием.
+    audit_archive_command: tuple[str, ...] = ()
+    # Автоматический якорь: раз в anchor_interval секунд дописать голову цепочки в
+    # anchor_file. Пусто = выключено. Файл должен лежать ВНЕ каталога данных шлюза,
+    # иначе взломщик с правом записи перепишет и его (это задача оператора).
+    audit_anchor_file: str | None = None
+    audit_anchor_interval: int = 3600
     # Общий потолок байт, которые одновременно буферизуются для ответов upstream (C-14).
     max_total_response_bytes: int = 256 * 1024 * 1024
     rate_per_sec: float = 5.0
@@ -99,6 +110,10 @@ class Config:
     # `gatekeeper approve`. Пусто = выключено. ttl: сколько секунд живёт заявка/подтверждение.
     confirm_apis: tuple[str, ...] = ()
     confirm_ttl: int = 300
+    # Подписанные одобрения (B1): одобрять может только владелец ключа оператора.
+    # По умолчанию выключено: старое поведение не меняется.
+    confirm_require_signed: bool = False
+    confirm_operator_key: str | None = None  # путь к PEM-файлу публичного ключа Ed25519
     # Несколько провайдеров на одном шлюзе: таблицы [providers.<имя>]. Пусто = один провайдер
     # из [provider] (прежний формат).
     providers: tuple[ProviderCfg, ...] = ()
@@ -130,11 +145,21 @@ _SCHEMA: dict[str, dict[str, type]] = {
         "header_timeout": float, "body_timeout": float,
     },
     "anomaly": {"autofreeze_threshold": int, "autofreeze_window": int},
-    "confirm": {"apis": list, "ttl": int},
+    "confirm": {"apis": list, "ttl": int, "require_signed_approvals": bool,
+                "operator_public_key": str},
+    "state": {"synchronous": str},
+    "audit": {"archive_command": list, "anchor_file": str, "anchor_interval": int},
 }
 # (секция, ключ) -> поле Config, если имя отличается от ключа
 _FIELD = {("provider", "name"): "provider", ("confirm", "apis"): "confirm_apis",
-          ("confirm", "ttl"): "confirm_ttl"}
+          ("confirm", "ttl"): "confirm_ttl",
+          ("confirm", "require_signed_approvals"): "confirm_require_signed",
+          ("confirm", "operator_public_key"): "confirm_operator_key",
+          ("state", "synchronous"): "state_synchronous",
+          ("audit", "archive_command"): "audit_archive_command",
+          ("audit", "anchor_file"): "audit_anchor_file",
+          ("audit", "anchor_interval"): "audit_anchor_interval"}
+_SYNCHRONOUS = ("normal", "full")
 
 
 def _check_type(section: str, key: str, value: object, typ: type) -> object:
@@ -270,4 +295,18 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError("[confirm] apis: invalid api name")
     if not 1 <= cfg.confirm_ttl <= 86400:
         raise ConfigError("[confirm] ttl must be between 1 and 86400")
+    if cfg.confirm_require_signed and not cfg.confirm_operator_key:
+        raise ConfigError("[confirm] require_signed_approvals needs operator_public_key")
+    if cfg.state_synchronous not in _SYNCHRONOUS:
+        raise ConfigError(f"[state] synchronous must be one of {list(_SYNCHRONOUS)}")
+    if cfg.audit_archive_command:
+        if len(cfg.audit_archive_command) > 64:
+            raise ConfigError("[audit] archive_command: too many arguments (max 64)")
+        if not all(isinstance(a, str) and a and len(a) <= 4096
+                   for a in cfg.audit_archive_command):
+            raise ConfigError("[audit] archive_command: every argument must be a non-empty string")
+    if cfg.audit_anchor_file is not None and not cfg.audit_anchor_file:
+        raise ConfigError("[audit] anchor_file must not be empty")
+    if not 60 <= cfg.audit_anchor_interval <= 7 * 86400:
+        raise ConfigError("[audit] anchor_interval must be between 60 and 604800 seconds")
     return cfg

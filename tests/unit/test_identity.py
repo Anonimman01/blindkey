@@ -1,3 +1,5 @@
+import os
+
 from cryptography.hazmat.primitives.serialization import Encoding
 
 from gatekeeper.pki import ca
@@ -73,3 +75,22 @@ def test_broken_entry_is_unusable(tmp_path):
     store, cert, *_ = setup(tmp_path, allow=("POST:bad/path",))
     assert store.identify(der(cert)).reason == "unknown"
     assert store.invalid_entries == 1
+
+
+def test_failed_reload_is_retried_after_repair_without_stat_change(tmp_path):
+    """Сбой load() не должен залипать: файл починили, а stat остался прежним."""
+    store, cert, *_ = setup(tmp_path)
+    assert store.identify(der(cert)).reason == "ok"
+    path = store._registry.path
+    good = path.read_bytes()
+    stat = os.stat(path)
+
+    path.write_bytes(b"!" * len(good))  # битый JSON того же размера
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+    broken = os.stat(path)
+    assert store.identify(der(cert)).reason == "unknown"  # fail closed
+
+    path.write_bytes(good)
+    os.utime(path, ns=(broken.st_atime_ns, broken.st_mtime_ns))
+    assert os.stat(path).st_size == broken.st_size
+    assert store.identify(der(cert)).reason == "ok"  # тот же stat, но перечитываем

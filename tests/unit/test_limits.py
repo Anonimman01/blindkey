@@ -37,6 +37,27 @@ def test_ban_never_shortened():
     assert b.is_banned("ip")
 
 
+def test_expired_ban_is_deleted_from_store_outside_the_lock():
+    calls: list[tuple[str, bool]] = []
+
+    class Store:
+        def load_bans(self, now):
+            return {}
+
+        def set_ban(self, ip, until):
+            pass
+
+        def del_ban(self, ip):
+            calls.append((ip, bans._lock.locked()))
+
+    t = [1000]
+    bans = IpBanList(lambda: t[0], store=Store())
+    bans.ban("1.2.3.4", 60)
+    t[0] += 60
+    assert not bans.is_banned("1.2.3.4")
+    assert calls == [("1.2.3.4", False)]  # del_ban не держит self._lock
+
+
 def test_ban_nonpositive_ignored():
     b = IpBanList(clock=Clock())
     b.ban("ip", 0)

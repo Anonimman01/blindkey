@@ -77,7 +77,10 @@ class IpBanList:
         self._store = store
         self._max = max_entries
         loaded = store.load_bans(clock()) if store else {}
-        self._until = _merge_bans(loaded)
+        # OrderedDict как прокси возраста бана: порядок вставки — от раннего срока к позднему,
+        # поэтому вытеснение самого старого — popitem(last=False), без линейного min().
+        self._until: OrderedDict[str, int] = OrderedDict(
+            sorted(_merge_bans(loaded).items(), key=lambda kv: kv[1]))
         if store is not None:
             _migrate_bans(store, loaded, self._until)
 
@@ -93,32 +96,37 @@ class IpBanList:
             if ip not in self._until and len(self._until) >= self._max:
                 self._make_room(now)
             self._until[ip] = until
+            self._until.move_to_end(ip)  # продлённый бан — «моложе» остальных
             if self._store:
                 self._store.set_ban(ip, until)
 
     def _make_room(self, now: int) -> None:
-        """Под замком: выкинуть истёкшие баны, а если мало, то ближайший к истечению."""
+        """Под замком: выкинуть истёкшие баны, а если мало, то самый старый по вставке."""
         for ip in [k for k, u in self._until.items() if u <= now]:
             del self._until[ip]
         if len(self._until) >= self._max:
-            oldest = min(self._until, key=self._until.__getitem__)
-            del self._until[oldest]
+            oldest, _ = self._until.popitem(last=False)  # O(1) вместо min() по всему словарю
             if self._store:
                 self._store.del_ban(oldest)
 
     def is_banned(self, ip: str) -> bool:
         ip = normalize_ip(ip)
         now = self._clock()
+        expired = False
         with self._lock:
             until = self._until.get(ip)
             if until is None:
                 return False
             if until <= now:
                 del self._until[ip]
-                if self._store:
-                    self._store.del_ban(ip)
-                return False
-            return True
+                expired = True
+            else:
+                return True
+        # Запись в SQLite — вне замка: ввод-вывод под ним задерживал проверку банов
+        # для всех остальных соединений.
+        if expired and self._store:
+            self._store.del_ban(ip)
+        return False
 
 
 class ConnectionLimiter:

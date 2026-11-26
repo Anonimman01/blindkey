@@ -213,3 +213,51 @@ def test_audit_failure_prevents_the_upstream_call(tmp_path, monkeypatch):
     monkeypatch.setattr(env.p.audit, "_flush", boom)
     status, _ = call(env, make_req(env.fp))
     assert status == 500 and not env.up.calls
+
+
+def _fail_requests(env, monkeypatch, failures: int | None, counter: list[int]):
+    """Проваливать запись `request_ok`: failures=None — всегда, иначе только N раз."""
+    from gatekeeper.core.errors import AuditError
+
+    real = env.p.audit.append
+
+    def append(etype, data=None, severity=None):
+        if getattr(etype, "value", etype) == "request_ok":
+            counter.append(1)
+            if failures is None or len(counter) <= failures:
+                raise AuditError("disk full")
+        return real(etype, data, severity)
+
+    monkeypatch.setattr(env.p.audit, "append", append)
+
+
+def test_unlogged_result_returns_the_upstream_answer_not_500(tmp_path, monkeypatch):
+    """A2: действие выполнено — клиент получает ответ upstream и метку, а не 500.
+
+    500 подтолкнул бы к повтору неидемпотентного действия (sendMessage), поэтому статус
+    и тело берутся у upstream, а заголовок X-Gatekeeper-Audit говорит «выполнено,
+    журнал не обновлён».
+    """
+    env = make_env(tmp_path)
+    tries: list[int] = []
+    _fail_requests(env, monkeypatch, None, tries)
+    status, resp = call(env, make_req(env.fp))
+    assert status == 200 and resp.endswith(b'{"ok":true}')
+    assert b"X-Gatekeeper-Audit: failed" in resp
+    assert len(tries) == 3                  # ограниченный повтор, не бесконечный
+    assert len(env.up.calls) == 1           # upstream повторно НЕ вызывался
+    log = audit_text(env)
+    assert "request_intent" in log and "request_unlogged" in log
+    assert '"executed":true' in log.replace(" ", "")
+    assert "request_ok" not in log
+
+
+def test_transient_audit_failure_is_retried_and_leaves_no_header(tmp_path, monkeypatch):
+    """A2: одна неудачная запись результата лечится повтором."""
+    env = make_env(tmp_path)
+    tries: list[int] = []
+    _fail_requests(env, monkeypatch, 1, tries)
+    status, resp = call(env, make_req(env.fp))
+    assert status == 200 and b"X-Gatekeeper-Audit" not in resp
+    assert len(tries) == 2 and "request_ok" in audit_text(env)
+    assert "request_unlogged" not in audit_text(env)

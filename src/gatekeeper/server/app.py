@@ -7,14 +7,18 @@ import os
 import signal
 import ssl
 import stat
+import sys
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
 
 from gatekeeper.core.errors import GatekeeperError
-from gatekeeper.core.events import EventType
+from gatekeeper.core.events import EventType, Severity
 from gatekeeper.core.timeutil import unix_now
 from gatekeeper.pki import ca as pki_ca
 from gatekeeper.server.anomaly import AnomalyMonitor
+from gatekeeper.server.audit.anchor import Anchor, append_anchor
 from gatekeeper.server.audit.chain import AuditChain
 from gatekeeper.server.audit.sink import FileSink
 from gatekeeper.server.config import Config, ConfigError
@@ -36,7 +40,7 @@ from gatekeeper.server.providers import create_provider
 from gatekeeper.server.state import StateStore
 from gatekeeper.server.tls import build_server_context, peer_cert_der
 from gatekeeper.server.upstream import ResponseBudget, Upstream
-from gatekeeper.store.approvals import Approvals
+from gatekeeper.store.approvals import Approvals, load_operator_key
 from gatekeeper.store.fsperm import harden_private_file, harden_sqlite_files
 from gatekeeper.store.layout import Layout
 from gatekeeper.store.registry import Registry
@@ -45,6 +49,21 @@ from gatekeeper.store.secrets import load_secret
 _CONN_DEADLINE = 120.0  # потолок на всё соединение
 _HANDSHAKE_TIMEOUT = 5.0
 _OPS_LINE_LIMIT = 4096  # длина строки запроса на служебном сокете
+# Серверный сертификат живёт 365 дней и сам не продлевается: предупреждаем за 30 дней
+# и повторяем проверку раз в сутки (мониторинга срока у проекта нет).
+CERT_WARN_SECONDS = 30 * 86400
+_CERT_CHECK_INTERVAL = 86400.0
+
+
+def _cert_expiry_seconds(path: str | os.PathLike | None) -> int | None:
+    """Секунд до истечения серверного сертификата; None = файла нет или он не читается."""
+    if path is None:
+        return None
+    try:
+        cert = pki_ca.load_cert_pem(Path(path).read_bytes())
+    except (OSError, GatekeeperError):
+        return None
+    return int((pki_ca.cert_not_after(cert) - datetime.now(UTC)).total_seconds())
 
 
 class _HandshakeSlots:
@@ -99,8 +118,15 @@ class GatekeeperApp:
                  audit: AuditChain, http_limits: HttpLimits, ssl_ctx: ssl.SSLContext,
                  host: str, port: int, metrics: Metrics | None = None,
                  metrics_socket: str | None = None, max_handshaking_per_ip: int = 3,
-                 closers: tuple[Callable[[], None], ...] = ()) -> None:
+                 closers: tuple[Callable[[], None], ...] = (),
+                 server_cert: str | os.PathLike | None = None,
+                 anchor_file: str | None = None, anchor_interval: int = 3600) -> None:
         self.metrics, self.metrics_socket = metrics, metrics_socket
+        # Срок серверного сертификата: гейдж обновляется при старте и раз в сутки.
+        self.server_cert = server_cert
+        self._cert_expiry: int | None = _cert_expiry_seconds(server_cert)
+        # Автоякоря (A8): файл вне каталога данных задаёт оператор, шлюз только дописывает.
+        self.anchor_file, self.anchor_interval = anchor_file, anchor_interval
         self.pipeline, self.bans, self.limiter, self.audit = pipeline, bans, limiter, audit
         self.http_limits, self.ssl_ctx, self.host, self.port = http_limits, ssl_ctx, host, port
         self._malformed_log = RateLimiter(rate_per_sec=1.0, burst=5)  # защита журнала от флуда
@@ -199,6 +225,60 @@ class GatekeeperApp:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
+    async def _check_cert(self, *, initial: bool) -> None:
+        """Предупредить оператора о близком истечении серверного сертификата.
+
+        Продления нет: после истечения клиенты перестанут подключаться, поэтому кроме
+        ежедневной проверки предупреждение дублируется в stderr при старте.
+        """
+        seconds = _cert_expiry_seconds(self.server_cert)
+        self._cert_expiry = seconds
+        if seconds is None or seconds > CERT_WARN_SECONDS:
+            return
+        days = seconds // 86400
+        what = (f"server certificate expired {-days} day(s) ago" if seconds < 0
+                else f"server certificate expires in {days} day(s)")
+        if initial:
+            print(f"gatekeeper: warning: {what}: run `gatekeeper renew-server`, then restart",
+                  file=sys.stderr, flush=True)
+        try:
+            await asyncio.to_thread(
+                self.audit.append, EventType.SERVER_CERT_EXPIRING,
+                {"expires_in_seconds": seconds, "days": days,
+                 "action": "run" if initial else "watch"}, Severity.WARNING)
+        except Exception:  # срок не должен останавливать шлюз: оператор видел stderr
+            print(f"gatekeeper: warning: {what}: the audit log was not updated",
+                  file=sys.stderr, flush=True)
+
+    async def _cert_watch(self) -> None:
+        """Раз в сутки обновить срок сертификата и повторить предупреждение."""
+        while True:
+            await asyncio.sleep(_CERT_CHECK_INTERVAL)
+            await self._check_cert(initial=False)
+
+    async def _write_anchor(self) -> None:
+        """Дописать якорь текущей головы цепочки в файл оператора (A8)."""
+        if not self.anchor_file:
+            return
+        seq, digest = self.audit.head
+        if seq < 0:
+            return  # пустой журнал: якорей ещё нет
+        anchor = Anchor(seq, digest, unix_now())
+        try:
+            await asyncio.to_thread(append_anchor, self.anchor_file, anchor)
+        except Exception as exc:  # якорь не должен останавливать шлюз
+            print(f"gatekeeper: warning: cannot write the audit anchor: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self.audit.append, "audit_anchor_failed",
+                                        {"reason": type(exc).__name__}, Severity.ALERT)
+
+    async def _anchor_watch(self) -> None:
+        """Автоякорь по расписанию: хранение якорей вне шлюза — задача оператора."""
+        while True:
+            await asyncio.sleep(self.anchor_interval)
+            await self._write_anchor()
+
     async def serve(self, on_started=None) -> None:
         """on_started вызывается только после того, как порт реально занят.
 
@@ -214,14 +294,20 @@ class GatekeeperApp:
             loop.add_signal_handler(signal.SIGTERM, stop.set)
             sigterm_installed = True
         ops = None
+        cert_task: asyncio.Future | None = None
+        anchor_task: asyncio.Future | None = None
         try:
             async with server:
                 # Сокет — до записи «server_started»: при ошибке журнал не должен врать о запуске.
                 ops = await self._start_ops_socket()
+                await self._check_cert(initial=True)
                 await asyncio.to_thread(self.audit.append, EventType.SERVER_STARTED,
                                         {"action": "run", "listen": f"{self.host}:{self.port}"})
                 if on_started is not None:
                     on_started()
+                cert_task = asyncio.ensure_future(self._cert_watch())
+                if self.anchor_file:
+                    anchor_task = asyncio.ensure_future(self._anchor_watch())
                 forever = asyncio.ensure_future(server.serve_forever())
                 waiter = asyncio.ensure_future(stop.wait())
                 try:
@@ -231,6 +317,11 @@ class GatekeeperApp:
                     waiter.cancel()
                     await asyncio.gather(forever, waiter, return_exceptions=True)
         finally:
+            for task in (cert_task, anchor_task):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
             if sigterm_installed:
                 with contextlib.suppress(Exception):
                     loop.remove_signal_handler(signal.SIGTERM)
@@ -255,9 +346,19 @@ class GatekeeperApp:
                 continue
 
     def _gauges(self) -> dict[str, float]:
-        return {"gk_connections": float(self.limiter.total),
-                "gk_audit_next_seq": float(self.audit.next_seq),
-                "gk_nonce_cache_entries": float(len(self.pipeline.nonces))}
+        nonces = self.pipeline.nonces
+        gauges = {"gk_connections": float(self.limiter.total),
+                  "gk_audit_next_seq": float(self.audit.next_seq),
+                  "gk_nonce_cache_entries": float(len(nonces)),
+                  "gk_nonce_cache_fill_ratio": nonces.fill()}
+        if self.metrics is not None:
+            # Заполненность по клиентам — с меткой client. Обход клиентов только при scrape.
+            for cid, ratio in nonces.fills().items():
+                self.metrics.gauge("gk_nonce_cache_client_fill_ratio", ratio, client=cid)
+        if self._cert_expiry is not None:
+            # Секунд до истечения серверного сертификата; < 0 = уже истёк.
+            gauges["gk_server_cert_expiry_seconds"] = float(self._cert_expiry)
+        return gauges
 
     async def _start_ops_socket(self):
         """Служебный Unix-сокет: GET /healthz и GET /metrics. Не на публичном порту."""
@@ -325,6 +426,23 @@ def _validate_client_providers(*, registry_path, names: tuple[str, ...], default
                 "or re-issue the clients with --provider)")
 
 
+def _operator_public_key(cfg: Config):
+    """Публичный ключ оператора для подписанных одобрений (B1).
+
+    Шлюз держит только публичную часть: закрытый ключ остаётся на машине оператора.
+    """
+    if not cfg.confirm_operator_key:
+        return None
+    try:
+        pem = Path(cfg.confirm_operator_key).read_bytes()
+    except OSError as exc:
+        raise ConfigError("[confirm] cannot read operator_public_key") from exc
+    try:
+        return load_operator_key(pem)
+    except GatekeeperError as exc:
+        raise ConfigError(f"[confirm] operator_public_key: {exc}") from exc
+
+
 def _state_freezer(store: StateStore) -> Callable[[str], None]:
     """Автозаморозка в state.db (X-08): под systemd каталог конфигурации только для чтения."""
 
@@ -363,8 +481,9 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
     # repair_tail: недописанная последняя строка отрезается с событием audit_tail_repaired (B-02).
     # max_bytes/keep: журнал ротируется вместо бесконечного роста (C-06).
     audit = AuditChain(FileSink(layout.audit_log), secrets=all_secrets, repair_tail=True,
-                       max_bytes=cfg.audit_max_bytes, keep=cfg.audit_keep)
-    store = StateStore(layout.state_db) if cfg.persist_state else None
+                       max_bytes=cfg.audit_max_bytes, keep=cfg.audit_keep,
+                       archive_command=cfg.audit_archive_command)
+    store = StateStore(layout.state_db, cfg.state_synchronous) if cfg.persist_state else None
     metrics = Metrics()
     bans = IpBanList(store=store)
     ca_cert = pki_ca.load_cert_pem(layout.ca_cert.read_bytes())
@@ -381,7 +500,9 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
         anomalies=AnomalyMonitor(cfg.autofreeze_threshold, cfg.autofreeze_window, store=store),
         # Автозаморозка пишется в state.db: каталог конфигурации под systemd только для чтения.
         freeze_client=(_state_freezer(store) if store is not None else _registry_freezer(registry)),
-        approvals=(Approvals(layout.approvals_file, cfg.confirm_ttl)
+        approvals=(Approvals(layout.approvals_file, cfg.confirm_ttl,
+                             require_signed=cfg.confirm_require_signed,
+                             operator_key=_operator_public_key(cfg))
                    if cfg.confirm_apis or any(pc.confirm_apis for pc in cfg.effective_providers())
                    else None),
         confirm_apis=frozenset(cfg.confirm_apis),
@@ -397,4 +518,6 @@ def build_app(layout: Layout, cfg: Config) -> GatekeeperApp:
         host=cfg.listen_host, port=cfg.listen_port,
         metrics=metrics, metrics_socket=cfg.metrics_socket,
         max_handshaking_per_ip=cfg.max_handshaking_per_ip,
-        closers=(store.close,) if store is not None else ())
+        closers=(store.close,) if store is not None else (),
+        server_cert=layout.server_cert,
+        anchor_file=cfg.audit_anchor_file, anchor_interval=cfg.audit_anchor_interval)

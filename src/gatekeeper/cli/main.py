@@ -13,6 +13,7 @@ from gatekeeper.cli.commands import (
     client_status,
     confirm,
     decoy_create,
+    encrypt_registry,
     init,
     list_clients,
     renew,
@@ -56,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
                            ("revoke", client_status.revoke, "отозвать клиента навсегда")):
         s = sub.add_parser(name, help=text)
         s.add_argument("--id", required=True)
+        if name == "revoke":
+            s.add_argument("--force-no-audit", action="store_true",
+                           help="аварийный режим: отозвать, даже если журнал недоступен "
+                                "(состояние меняется без записи в журнал, с предупреждением)")
         s.set_defaults(func=fn)
 
     s = sub.add_parser("renew", help="выпустить клиенту новый сертификат и ключ (права сохраняются)")
@@ -77,11 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("pending", help="заявки на подтверждение опасных действий")
     s.set_defaults(func=confirm.pending)
 
-    for name, fn, text in (("approve", confirm.approve, "подтвердить заявку (одноразово, на ограниченное время)"),
-                           ("reject", confirm.reject, "отклонить заявку или отозвать подтверждение")):
-        s = sub.add_parser(name, help=text)
-        s.add_argument("--id", required=True, help="идентификатор из `gatekeeper pending` (хотя бы 6 символов)")
-        s.set_defaults(func=fn)
+    s = sub.add_parser("approve", help="подтвердить заявку (одноразово, на ограниченное время)")
+    s.add_argument("--id", required=True, help="идентификатор из `gatekeeper pending` (хотя бы 6 символов)")
+    s.add_argument("--sign-key", help="закрытый ключ оператора Ed25519 (PEM) для подписи одобрения; "
+                                       "ключ остаётся на машине оператора")
+    s.add_argument("--approval-out", help="записать подписанный файл для переноса на шлюз "
+                                           "(approvals.json не меняется)")
+    s.add_argument("--approval-file", help="применить подписанный файл с машины оператора")
+    s.set_defaults(func=confirm.approve)
+
+    s = sub.add_parser("reject", help="отклонить заявку или отозвать подтверждение")
+    s.add_argument("--id", required=True, help="идентификатор из `gatekeeper pending` (хотя бы 6 символов)")
+    s.set_defaults(func=confirm.reject)
 
     s = sub.add_parser("list-clients")
     s.set_defaults(func=list_clients.run)
@@ -108,7 +120,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--hint", default="", help="где вы её разместили (для журнала)")
     s.set_defaults(func=decoy_create.run)
 
+    s = sub.add_parser("encrypt-registry",
+                       help="зашифровать master_secret в clients.json (или --decrypt)")
+    s.add_argument("--decrypt", action="store_true",
+                   help="вернуть открытый текст (опасно: секреты снова читаемы)")
+    s.set_defaults(func=encrypt_registry.run)
+
     s = sub.add_parser("status", help="сводка: клиенты, сертификат, журнал, состояние")
+    s.add_argument("--ca-key", help="проверить и этот ca.key (предупредить, если он без пароля)")
     s.set_defaults(func=status.run)
 
     s = sub.add_parser("run", help="запустить шлюз")

@@ -3,7 +3,8 @@
 Зачем: без этого перезапуск (`systemctl restart`, падение) открывал окно повтора запросов,
 обнулял суточную квоту и забывал счётчики автозаморозки.
 
-Режим WAL + synchronous=NORMAL: транзакция переживает падение процесса и перезапуск службы,
+Режим WAL + synchronous=NORMAL (по умолчанию; `[state] synchronous = "full"` включает fsync
+каждой транзакции): транзакция переживает падение процесса и перезапуск службы,
 но не обязана переживать внезапную потерю питания (последние транзакции могут пропасть).
 Для nonce с окном в десятки секунд и для квоты это приемлемо; журнал аудита по-прежнему
 пишется с fsync. Любая ошибка БД пробрасывается наверх, и конвейер отвечает отказом (fail closed).
@@ -21,6 +22,8 @@ from pathlib import Path
 from gatekeeper.store.fsperm import harden_private_file, harden_sqlite_files
 
 _BINARY = getattr(os, "O_BINARY", 0)
+# Допустимые PRAGMA synchronous: только эти два значения (ничего из конфига в SQL не попадает).
+_SYNCHRONOUS = {"normal": "NORMAL", "full": "FULL"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS nonces(
@@ -59,7 +62,9 @@ def load_frozen_clients(path: str | os.PathLike) -> set[str]:
 
 
 class StateStore:
-    def __init__(self, path: str | os.PathLike) -> None:
+    def __init__(self, path: str | os.PathLike, synchronous: str = "normal") -> None:
+        if synchronous not in _SYNCHRONOUS:
+            raise ValueError(f"synchronous must be one of {sorted(_SYNCHRONOUS)}")
         self.path = Path(path)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Создаём файл сами, чтобы права были 0600 (sqlite иначе берёт umask).
@@ -68,7 +73,7 @@ class StateStore:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.execute(f"PRAGMA synchronous={_SYNCHRONOUS[synchronous]}")
         self._db.execute("PRAGMA busy_timeout=5000")  # ждать, а не падать при чужом писателе
         self._db.executescript(_SCHEMA)
         harden_sqlite_files(self.path)  # -wal/-shm создаются sqlite только что

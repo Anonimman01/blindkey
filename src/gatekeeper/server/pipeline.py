@@ -44,6 +44,15 @@ from gatekeeper.store.approvals import Approvals
 
 _H = {k: getattr(constants, f"HEADER_{k.upper()}").lower() for k in ("client", "epoch", "time", "nonce", "sig")}
 _PASSTHROUGH = frozenset({400, 401, 403, 404, 409, 429, 500, 502, 503})
+# Заголовок ответа клиенту: действие на upstream выполнено, но запись в журнал не удалась,
+# поэтому оператор должен увидеть запрос в журнале отдельно. Клиент по нему НЕ повторяет
+# запрос: тело и код — от upstream, то есть запрос уже выполнен.
+AUDIT_FAILED_HEADER = "X-Gatekeeper-Audit"
+_LOG_ATTEMPTS = 3
+_LOG_RETRY_DELAY = 0.05  # секунд; растёт линейно между попытками
+# Порог заполненности nonce-кэша (глобально или на клиента), при котором пишется событие:
+# до исчерпания ёмкости новые запросы отвергаются, и оператор должен узнать заранее.
+_NONCE_HIGH_WATER = 0.8
 
 
 def _num(value: object) -> int | None:
@@ -100,6 +109,8 @@ class Pipeline:
         # автозаморозка от этого не зависят: считается каждый отказ, пропускается только запись.
         self._deny_log_key = RateLimiter(rate_per_sec=2.0, burst=20)
         self._deny_log_all = RateLimiter(rate_per_sec=50.0, burst=200, max_keys=1)
+        # Заполненность кэша меняется медленно: не чаще одного события в минуту на ключ.
+        self._nonce_hw_log = RateLimiter(rate_per_sec=1 / 60, burst=2)
 
     async def _log(self, etype, data: dict, sev: Severity = Severity.INFO) -> None:
         rid = request_id.get()
@@ -108,6 +119,24 @@ class Pipeline:
         if self.metrics is not None:
             self.metrics.inc("gk_events_total", type=getattr(etype, "value", etype))
         await asyncio.to_thread(self.audit.append, etype, data, sev)
+
+    async def _log_with_retry(self, etype, data: dict, sev: Severity = Severity.INFO,
+                              *, attempts: int = _LOG_ATTEMPTS) -> bool:
+        """Запись в журнал с ограниченным повтором. True = записано.
+
+        Повтор нужен только для итога уже выполненного действия (`request_ok`): отказ журнала
+        не должен превращать выполненный запрос в ошибку для клиента. Текст ошибки не
+        логируется и не возвращается — журнал недоступен, а в тексте бывает путь.
+        """
+        for attempt in range(attempts):
+            try:
+                await self._log(etype, data, sev)
+                return True
+            except Exception:  # любая причина отказа журнала: решается выше, не здесь
+                if attempt + 1 >= attempts:
+                    return False
+                await asyncio.sleep(_LOG_RETRY_DELAY * (attempt + 1))
+        return False
 
     async def _deny(self, etype: EventType, status: int, reason: str, ip: str,
                     client: str | None = None, sev: Severity = Severity.WARNING,
@@ -122,6 +151,34 @@ class Pipeline:
             await self._maybe_autofreeze(client, etype, ip, anomalies)
         extra = {"Retry-After": str(retry_after)} if retry_after else None
         return neutral_response(status, extra)
+
+    async def _nonce_high_water(self, cid: str) -> None:
+        """Событие при заполненности nonce-кэша ≥80% (глобально или на клиента).
+
+        Считается O(1) на запрос (только свой клиент): обход всех клиентов на горячем пути
+        не нужен. Отказ журнала не должен ломать уже принятый запрос: проверка лишь
+        предупреждает, а не защищает.
+        """
+        try:
+            global_ratio = self.nonces.fill()
+            client_ratio = self.nonces.client_fill(cid)
+        except Exception:  # счётчик заполненности не должен влиять на обработку
+            return
+        if global_ratio >= _NONCE_HIGH_WATER:
+            scope, ratio = "global", global_ratio
+        elif client_ratio >= _NONCE_HIGH_WATER:
+            scope, ratio = "client", client_ratio
+        else:
+            return
+        if not self._nonce_hw_log.allow(f"{scope}:{cid}"):
+            return
+        with contextlib.suppress(Exception):
+            await self._log(EventType.NONCE_CACHE_HIGH_WATER,
+                            {"scope": scope, "client": cid, "fill": round(ratio, 4),
+                             "entries": len(self.nonces),
+                             "max_entries": self.nonces.capacity,
+                             "client_max_entries": self.nonces.client_capacity},
+                            Severity.WARNING)
 
     async def _maybe_autofreeze(self, client: str, etype, ip: str,
                                 anomalies: AnomalyMonitor) -> None:
@@ -253,6 +310,7 @@ class Pipeline:
         # StateStore пишет в SQLite: выносим из event loop (B-04).
         if not await asyncio.to_thread(self.nonces.check_and_add, cid, nonce):
             return await self._deny(EventType.DENY_REPLAY, 403, "replay_or_cache_full", ip, cid)
+        await self._nonce_high_water(cid)
 
         decision = rec.policy.check(req.method, req.target)
         if decision is None:
@@ -308,6 +366,14 @@ class Pipeline:
                 self.approvals.consume, cid, decision.rule.http_method, api, req.body,
                 "application/json")
             if not taken:
+                # Намерение уже в журнале, а действие не состоится. Явный итог, чтобы
+                # запись `request_intent` без `request_ok` не читалась как «возможно
+                # выполнено» (она означает ровно противоположное).
+                await self._log(
+                    EventType.REQUEST_ABORTED,
+                    {"client": cid, "api": api, "provider": pname, "ip": ip,
+                     "reason": "confirm_consumed", "approval": confirmed, "executed": False},
+                    Severity.WARNING)
                 return await self._deny(EventType.DENY_CONFIRM_REQUIRED, 403,
                                         f"confirm_consumed:{confirmed}", ip, cid, Severity.WARNING)
         t0 = time.monotonic()
@@ -342,14 +408,28 @@ class Pipeline:
                                 {"client": cid, "api": api, "ip": ip}, Severity.ALERT)
                 return neutral_response(502)
             status = safe.status if (200 <= safe.status < 300 or safe.status in _PASSTHROUGH) else 502
-            await self._log(EventType.REQUEST_OK,
-                            {"client": cid, "api": api, "provider": pname, "ip": ip,
-                             "status": status, "bytes": len(safe.body),
-                             **({"confirmed": confirmed} if confirmed else {})})
+            logged = await self._log_with_retry(
+                EventType.REQUEST_OK,
+                {"client": cid, "api": api, "provider": pname, "ip": ip,
+                 "status": status, "bytes": len(safe.body), "executed": True,
+                 **({"confirmed": confirmed} if confirmed else {})})
+            if not logged:
+                # Действие уже выполнено, поэтому клиент получает ответ upstream как есть,
+                # а не 500: 500 подтолкнул бы к повтору неидемпотентного запроса
+                # (sendMessage, createDnsRecord). Заголовок говорит «выполнено, журнал не
+                # обновлён», событие ALERT оставляет след для оператора.
+                await self._log_with_retry(
+                    EventType.REQUEST_UNLOGGED,
+                    {"client": cid, "api": api, "provider": pname, "ip": ip,
+                     "status": status, "bytes": len(safe.body), "executed": True},
+                    Severity.ALERT, attempts=1)
+                audit_header = {AUDIT_FAILED_HEADER: "failed"}
+            else:
+                audit_header = None
             try:
-                return build_response(status, safe.body, safe.content_type)
+                return build_response(status, safe.body, safe.content_type, audit_header)
             except ValueError:
-                return neutral_response(502)
+                return neutral_response(502, audit_header)
         finally:
             # Резерв снимается только после фильтра и сборки ответа (или отказа), иначе
             # под конкуренцией реальная память превысит max_total_response_bytes (C-14).

@@ -265,6 +265,29 @@ def test_approvals_store_failure_fails_closed(tmp_path):
     assert call(env, make_req(env.fp))[0] == 500 and not env.up.calls
 
 
+def test_lost_approval_race_leaves_an_explicit_abort_in_the_journal(tmp_path, monkeypatch):
+    """A1: намерение без итога больше не читается как «возможно выполнено».
+
+    Параллельный запрос успел израсходовать подтверждение между проверкой и расходованием:
+    `consume()` возвращает False. В журнале появляется `request_aborted` с причиной.
+    """
+    env = make_env(tmp_path)
+    st = arm(env, tmp_path)
+    assert call(env, make_req(env.fp))[0] == 403            # заявка создана
+    (rid, _entry), = st.list_items()
+    st.approve(rid)
+    # Тот самый параллельный запрос выиграл гонку: расходование не удаётся.
+    monkeypatch.setattr(st, "consume", lambda *_a, **_k: False)
+    assert call(env, make_req(env.fp))[0] == 403 and not env.up.calls
+    log = audit_text(env)
+    assert "request_intent" in log, "намерение должно быть в журнале"
+    assert "request_aborted" in log
+    assert '"reason":"confirm_consumed"' in log.replace(" ", "")
+    assert '"executed":false' in log.replace(" ", "")
+    assert '"approval":"' + rid + '"' in log.replace(" ", "")
+    assert "request_ok" not in log
+
+
 # ---- конфиг ----
 
 def _cfg(tmp_path, text):

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gatekeeper.server.app import GatekeeperApp
+from gatekeeper.server.nonce_cache import NonceCache
 from gatekeeper.server.observe import Metrics
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets")
@@ -18,7 +19,8 @@ def make_app(sock):
     app.metrics, app.metrics_socket = Metrics(), str(sock)
     app.limiter = SimpleNamespace(total=2)
     app.audit = SimpleNamespace(next_seq=7)
-    app.pipeline = SimpleNamespace(nonces=[1, 2, 3])
+    app.pipeline = SimpleNamespace(nonces=NonceCache(max_entries=100))
+    app.server_cert, app._cert_expiry = None, None   # без сертификата: гейдж не выводится
     return app
 
 

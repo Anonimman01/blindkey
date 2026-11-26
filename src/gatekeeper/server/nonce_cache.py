@@ -5,6 +5,8 @@
 в течение 2*skew секунд. Берём 2*skew + запас.
 При переполнении кэша новые nonce отклоняются (fail closed). Чтобы один клиент не мог
 занять весь кэш и отрезать остальных, на клиента действует свой потолок (max_per_client).
+Заполненность видна через `fill()`/`client_fill()`/`fills()`: по ним шлюз пишет метрики
+и предупреждение при 80%, чтобы исчерпание ёмкости не стало неожиданным.
 Если передан StateStore, nonce переживают перезапуск шлюза.
 """
 from __future__ import annotations
@@ -84,6 +86,32 @@ class NonceCache:
             if self._store:
                 self._store.add_nonce(client_id, nonce, exp)
             return True
+
+    @property
+    def capacity(self) -> int:
+        return self._max
+
+    @property
+    def client_capacity(self) -> int:
+        return self._max_client
+
+    def fill(self) -> float:
+        """Заполненность глобального кэша (0..1). O(1): для горячего пути и метрик."""
+        with self._lock:
+            self._purge(self._clock())
+            return len(self._items) / self._max
+
+    def client_fill(self, client_id: str) -> float:
+        """Заполненность кэша одного клиента (0..1). O(1)."""
+        with self._lock:
+            self._purge(self._clock())
+            return self._per_client.get(client_id, 0) / self._max_client
+
+    def fills(self) -> dict[str, float]:
+        """Заполненность по клиентам: только для метрик (обходит всех клиентов)."""
+        with self._lock:
+            self._purge(self._clock())
+            return {cid: n / self._max_client for cid, n in self._per_client.items()}
 
     def __len__(self) -> int:
         with self._lock:

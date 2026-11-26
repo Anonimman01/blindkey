@@ -19,6 +19,13 @@ from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.signing import is_valid_client_id
 from gatekeeper.server.audit.sink import _try_lock, _unlock
 from gatekeeper.store.atomic import atomic_write_private
+from gatekeeper.store.registry_key import (
+    ENV_KEY_FILE,
+    RegistryKeyError,
+    load_key_from_env,
+    seal,
+    unseal,
+)
 
 _BINARY = getattr(os, "O_BINARY", 0)
 STATUSES = frozenset({"active", "frozen", "revoked"})
@@ -30,11 +37,69 @@ class RegistryError(GatekeeperError):
     """Ошибка реестра клиентов."""
 
 
-class Registry:
-    def __init__(self, path: str | os.PathLike):
-        self.path = Path(path)
+class RegistryLockedError(RegistryError):
+    """clients.json зашифрован, а ключа нет: секреты прочитать нельзя.
 
-    def load(self) -> dict[str, dict]:
+    Метаданные (статус, отпечаток, срок) при этом доступны: `load(decrypt=False)` и
+    `set_status(..., decrypt=False)` работают без ключа, иначе инцидент нельзя закрыть.
+    """
+
+
+class Registry:
+    """Реестр клиентов. При наличии ключа master_secret хранится зашифрованным (B2).
+
+    На диске тогда лежит `master_secret_enc`, а `load()` возвращает расшифрованный
+    `master_secret` в памяти: остальной код (identity, CLI) работает как раньше.
+    """
+
+    def __init__(self, path: str | os.PathLike, *, key: bytes | None = None):
+        self.path = Path(path)
+        # Единственный переключатель шифрования — переменная окружения с путём к ключу:
+        # без неё всё как раньше (открытый текст), с ней и чтение, и запись шифруются.
+        # Так опция работает одинаково для шлюза и для CLI (add-client, renew, freeze).
+        if key is None and os.environ.get(ENV_KEY_FILE):
+            key = load_key_from_env()
+        self._key = key
+
+    def _decrypt_entry(self, client_id: str, entry: dict) -> dict:
+        enc = entry.get("master_secret_enc")
+        if enc is None:
+            return entry
+        if self._key is None:
+            raise RegistryLockedError(
+                "clients.json is encrypted: set GATEKEEPER_REGISTRY_KEY_FILE "
+                "(or run `gatekeeper encrypt-registry --decrypt`); status/freeze/revoke "
+                "work without the key")
+        try:
+            entry["master_secret"] = unseal(self._key, enc, client_id)
+        except RegistryKeyError as exc:
+            raise RegistryError(f"client {client_id}: {exc}") from exc
+        return entry
+
+    @staticmethod
+    def _with_secret(client_id: str, entry: dict, key: bytes | None) -> dict:
+        """Копия записи в том виде, в котором её надо записать на диск."""
+        out = dict(entry)
+        enc = out.pop("master_secret_enc", None)
+        secret = out.pop("master_secret", None)
+        if secret is None:
+            # Секрета в памяти нет (load(decrypt=False) или запись без секрета): шифротекст
+            # сохраняем как есть, иначе смена статуса стёрла бы master_secret клиента.
+            if enc is not None:
+                out["master_secret_enc"] = enc
+            return out
+        if key is None:
+            out["master_secret"] = secret
+        else:
+            out["master_secret_enc"] = seal(key, secret, client_id)
+        return out
+
+    def load(self, *, decrypt: bool = True) -> dict[str, dict]:
+        """Прочитать реестр. `decrypt=False` — только метаданные, без master_secret.
+
+        Так `status`/`freeze`/`revoke` работают и без ключа шифрования: для реакции на
+        инцидент секрет не нужен, а ключ есть только у службы шлюза.
+        """
         try:
             raw = self.path.read_text("utf-8")
         except FileNotFoundError:
@@ -46,10 +111,13 @@ class Registry:
                 raise ValueError
         except (ValueError, KeyError, TypeError) as exc:
             raise RegistryError("clients.json is malformed") from exc
-        return clients
+        if not decrypt:
+            return dict(clients)
+        return {cid: self._decrypt_entry(cid, entry) if isinstance(entry, dict) else entry
+                for cid, entry in clients.items()}
 
     def check_permissions(self) -> None:
-        """Файл хранит master_secret открытым текстом: он должен быть доступен только владельцу.
+        """Файл хранит master_secret (открытым текстом или шифротекстом): доступ только владельцу.
 
         Нарушение (бэкап, cp без -p, umask 022) = RegistryError. На Windows не проверяется.
         """
@@ -67,8 +135,17 @@ class Registry:
             raise RegistryError("clients.json must be owned by the user running gatekeeper")
 
     def _save(self, clients: dict[str, dict]) -> None:
-        data = json.dumps({"version": 1, "clients": clients}, indent=2, sort_keys=True)
+        stored = {cid: self._with_secret(cid, entry, self._key) if isinstance(entry, dict) else entry
+                  for cid, entry in clients.items()}
+        data = json.dumps({"version": 1, "clients": stored}, indent=2, sort_keys=True)
         atomic_write_private(self.path, data.encode("utf-8"))
+
+    def rekey(self, key: bytes | None) -> None:
+        """Переписать реестр под новый ключ: key=None — хранить открытым текстом (B2)."""
+        with self._locked():
+            clients = self.load()
+            self._key = key
+            self._save(clients)
 
     @contextmanager
     def _locked(self, timeout: float = 10.0) -> Iterator[None]:
@@ -112,12 +189,16 @@ class Registry:
             clients[client_id] = entry
             self._save(clients)
 
-    def set_status(self, client_id: str, status: str) -> None:
-        """Меняет статус по таблице переходов (revoked необратим)."""
+    def set_status(self, client_id: str, status: str, *, decrypt: bool = True) -> None:
+        """Меняет статус по таблице переходов (revoked необратим).
+
+        `decrypt=False` — для работы с шифрованным реестром без ключа: шифротекст
+        сохраняется без изменений.
+        """
         if status not in STATUSES:
             raise RegistryError("invalid status")
         with self._locked():
-            clients = self.load()
+            clients = self.load(decrypt=decrypt)
             if client_id not in clients:
                 raise RegistryError("unknown client")
             current = clients[client_id].get("status")

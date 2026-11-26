@@ -32,10 +32,17 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # POSIX: не идти по подло
 
 @dataclass(frozen=True)
 class SegmentStart:
-    """Первая запись нового сегмента: seq и hash (следующая запись будет seq + 1)."""
+    """Первая запись нового сегмента: seq и hash (следующая запись будет seq + 1).
+
+    `archive`/`head` — закрытый сегмент и его голова (для хука архивации, A7): они нужны
+    вызывающему уже после снятия замка, поэтому ротация возвращает их, а не запускает
+    внешнюю команду сама (внешняя команда не должна держать замок журнала).
+    """
 
     seq: int
     hash: str
+    archive: Path | None = None
+    head: Path | None = None
 
 
 def _archive_path(sink: FileSink, ts: int) -> Path:
@@ -133,4 +140,4 @@ def rotate_audit_locked(
     os.replace(pending, sink.path)
     _fsync_dir(sink.path.parent)
     _prune(sink, keep)
-    return SegmentStart(0, digest)
+    return SegmentStart(0, digest, archive, archive.with_name(archive.name + ".head"))

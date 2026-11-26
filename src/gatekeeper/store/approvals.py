@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -19,6 +20,11 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+
+from gatekeeper.core import constants
 from gatekeeper.core.errors import GatekeeperError
 from gatekeeper.core.timeutil import unix_now
 from gatekeeper.server.audit.sink import _try_lock, _unlock
@@ -35,6 +41,11 @@ PREVIEW_LEN = 200
 # Для параметров подтверждаемого JSON-запроса места больше: оператор должен видеть все
 # ключи запроса, а не начало тела (C-04).
 PARAM_PREVIEW_LEN = 400
+# Подписанное одобрение (B1): Ed25519, отдельный ключ на машине оператора. Шлюз держит
+# только публичную часть и принимает одобрение, только если подпись сходится.
+SIGN_ALG = "ed25519"
+SIGNATURE_FIELDS = frozenset({"alg", "signature", "key_fingerprint", "issued_at"})
+_APPROVAL_DOC_VERSION = 1
 
 
 class ApprovalError(GatekeeperError):
@@ -47,9 +58,66 @@ def request_key(client_id: str, http_method: str, api: str, body: bytes,
 
     Content-Type входит в ключ: одно и то же тело как JSON и как form — разные запросы (X-03).
     """
-    body_hash = hashlib.sha256(body).hexdigest()
-    raw = "\n".join((client_id, http_method, api, body_hash, content_type)).encode("utf-8")
+    return request_key_from_hash(client_id, http_method, api,
+                                 hashlib.sha256(body).hexdigest(), content_type)
+
+
+def request_key_from_hash(client_id: str, http_method: str, api: str, body_sha256: str,
+                          content_type: str = "") -> str:
+    """То же без тела: нужно подписанному документу, где тела нет, а есть только хеш."""
+    raw = "\n".join((client_id, http_method, api, body_sha256, content_type)).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def approval_payload(entry: dict, issued_at: int) -> bytes:
+    """Канонические байты, которые подписывает оператор и проверяет шлюз.
+
+    Подписывается вся запись, кроме самой подписи, вместе с `issued_at`: подмена любого
+    поля, включая `expires`, ломает подпись. Раньше `expires` в подпись не входил, поэтому
+    правка срока действия в approvals.json продлевала уже выданное одобрение навсегда.
+    """
+    body = {k: v for k, v in entry.items() if k != "signature"}
+    body["issued_at"] = issued_at
+    try:
+        return json.dumps(body, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False).encode("ascii")
+    except (TypeError, ValueError) as exc:
+        raise ApprovalError("approval record cannot be canonicalized") from exc
+
+
+def operator_key_fingerprint(public_key: Ed25519PublicKey) -> str:
+    raw = public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def load_operator_key(pem: bytes) -> Ed25519PublicKey:
+    """Публичный ключ оператора (PEM). Ничего, кроме Ed25519, не принимается."""
+    try:
+        key = serialization.load_pem_public_key(pem)
+    except (ValueError, TypeError) as exc:
+        raise ApprovalError("operator public key is not a valid PEM public key") from exc
+    if not isinstance(key, Ed25519PublicKey):
+        raise ApprovalError("operator public key must be Ed25519")
+    return key
+
+
+def load_signing_key(pem: bytes) -> Ed25519PrivateKey:
+    """Закрытый ключ оператора для подписи одобрения (только на машине оператора)."""
+    try:
+        key = serialization.load_pem_private_key(pem, password=None)
+    except (ValueError, TypeError) as exc:
+        raise ApprovalError("signing key is not an unencrypted PEM private key") from exc
+    if not isinstance(key, Ed25519PrivateKey):
+        raise ApprovalError("signing key must be Ed25519")
+    return key
+
+
+def make_signature(private_key: Ed25519PrivateKey, entry: dict, issued_at: int) -> dict:
+    payload = approval_payload(entry, issued_at)
+    raw = private_key.sign(payload)
+    return {"alg": SIGN_ALG, "signature": base64.b64encode(raw).decode("ascii"),
+            "key_fingerprint": operator_key_fingerprint(private_key.public_key()),
+            "issued_at": issued_at}
 
 
 _HEX64 = frozenset("0123456789abcdef")
@@ -63,10 +131,41 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _is_hex16(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 16 and set(value) <= _HEX64
+
+
+def _validate_signature(sig: object) -> None:
+    if not isinstance(sig, dict) or set(sig) != SIGNATURE_FIELDS:
+        raise ValueError("bad signature")
+    if sig.get("alg") != SIGN_ALG:
+        raise ValueError("bad signature algorithm")
+    raw = sig.get("signature")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("bad signature value")
+    try:
+        base64.b64decode(raw, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("bad signature encoding") from exc
+    if not _is_hex16(sig.get("key_fingerprint")) or not _is_int(sig.get("issued_at")):
+        raise ValueError("bad signature metadata")
+
+
+# Набор полей записи закрыт: лишний ключ — повреждённая запись, а не запас на будущее.
+# Иначе в подписанную запись можно было бы добавить поле, которого нет в подписи.
+_ENTRY_FIELDS = frozenset({
+    "status", "client", "method", "api", "body_sha256", "body_len", "preview", "ip",
+    "content_type", "created", "expires", "signature",
+})
+_REQUIRED_ENTRY_FIELDS = _ENTRY_FIELDS - {"signature"}
+
+
 def _validate_entry(key: object, v: object) -> None:
     """Запись должна быть целой и согласованной с ключом (клиент/метод/API/хеш тела)."""
     if not _is_hex64(key) or not isinstance(v, dict):
         raise ValueError("bad entry")
+    if set(v) - _ENTRY_FIELDS or _REQUIRED_ENTRY_FIELDS - set(v):
+        raise ValueError("bad fields")
     if v.get("status") not in (PENDING, APPROVED):
         raise ValueError("bad status")
     # Записи старого формата (без content_type) считаются повреждёнными и отбрасываются:
@@ -79,6 +178,8 @@ def _validate_entry(key: object, v: object) -> None:
     for f in ("body_len", "created", "expires"):
         if not _is_int(v.get(f)):
             raise ValueError(f"bad {f}")
+    if v.get("signature") is not None:
+        _validate_signature(v["signature"])
     raw = "\n".join((v["client"], v["method"], v["api"], v["body_sha256"],
                      v["content_type"])).encode("utf-8")
     if hashlib.sha256(raw).hexdigest() != key:
@@ -99,11 +200,54 @@ class RequestResult:
 
 class Approvals:
     def __init__(self, path: str | os.PathLike, ttl: int = 300,
-                 clock: Callable[[], int] = unix_now) -> None:
+                 clock: Callable[[], int] = unix_now, *,
+                 require_signed: bool = False,
+                 operator_key: Ed25519PublicKey | None = None) -> None:
         if ttl <= 0:
             raise ValueError("ttl must be positive")
+        if require_signed and operator_key is None:
+            raise ValueError("require_signed needs the operator public key")
         self.path, self.ttl, self._clock = Path(path), ttl, clock
+        self.require_signed = require_signed
+        self._operator_key = operator_key
         self.last_dropped = 0  # сколько повреждённых записей проигнорировано последним чтением
+
+    # ---- подпись оператора (B1) ----
+    def signature_ok(self, entry: dict) -> bool:
+        """Сходится ли подпись записи с публичным ключом оператора."""
+        if self._operator_key is None:
+            return False
+        sig = entry.get("signature")
+        try:
+            _validate_signature(sig)
+        except ValueError:
+            return False
+        assert isinstance(sig, dict)
+        raw = base64.b64decode(sig["signature"], validate=True)
+        try:
+            payload = approval_payload(entry, sig["issued_at"])
+        except ApprovalError:
+            return False
+        try:
+            self._operator_key.verify(raw, payload)
+        except InvalidSignature:
+            return False
+        return True
+
+    def _authorized(self, entry: dict) -> bool:
+        """Подтверждение действует: статус approved и, если требуется, валидная подпись."""
+        if entry.get("status") != APPROVED:
+            return False
+        return self.signature_ok(entry) if self.require_signed else True
+
+    def _check_signature_issued(self, signature: dict) -> None:
+        """Подпись должна быть свежей: из неё считается срок действия одобрения."""
+        now = self._clock()
+        issued = signature["issued_at"]
+        if issued > now + constants.MAX_CLOCK_SKEW_SECONDS:
+            raise ApprovalError("signed approval is dated in the future")
+        if now - issued > self.ttl:
+            raise ApprovalError("signed approval is stale")
 
     # ---- файл ----
     def _read(self) -> tuple[dict[str, dict], int]:
@@ -189,7 +333,7 @@ class Approvals:
             items, dropped = self._read()
             changed = self._purge(items) or dropped > 0
             entry = items.get(key)
-            if entry is not None and entry.get("status") == APPROVED:
+            if entry is not None and self._authorized(entry):
                 if consume:
                     del items[key]
                     self._save(items)
@@ -225,7 +369,7 @@ class Approvals:
             items, dropped = self._read()
             changed = self._purge(items) or dropped > 0
             entry = items.get(key)
-            if entry is None or entry.get("status") != APPROVED:
+            if entry is None or not self._authorized(entry):
                 if changed:
                     self._save(items)
                 return False
@@ -266,8 +410,12 @@ class Approvals:
             raise ApprovalError("id is ambiguous")
         return found[0]
 
-    def approve(self, prefix: str) -> dict:
-        """Подтвердить заявку: срок подтверждения отсчитывается от этого момента."""
+    def approve(self, prefix: str, signature: dict | None = None) -> dict:
+        """Подтвердить заявку: срок подтверждения отсчитывается от этого момента.
+
+        При `require_signed` одобрение без валидной подписи оператора не выдаётся: шлюз
+        и оператор под одним пользователем больше не могут обойти проверку (B1).
+        """
         with self._locked():
             items, _dropped = self._read()
             self._purge(items)
@@ -275,10 +423,84 @@ class Approvals:
             entry = items[key]
             if entry.get("status") != PENDING:
                 raise ApprovalError("already approved")
-            entry["status"] = APPROVED
-            entry["expires"] = self._clock() + self.ttl
+            if signature is not None:
+                _validate_signature(signature)
+                # Подпись покрывает всю запись, поэтому expires выводится из подписи до
+                # проверки: иначе проверять было бы нечего.
+                entry = {**entry, "status": APPROVED,
+                         "expires": signature["issued_at"] + self.ttl,
+                         "signature": signature}
+                if not self.signature_ok(entry):
+                    raise ApprovalError("approval signature does not match the operator key")
+                self._check_signature_issued(signature)
+                items[key] = entry
+            elif self.require_signed:
+                raise ApprovalError("a signed approval is required: --sign-key or --approval-file")
+            else:
+                entry["expires"] = self._clock() + self.ttl
+                entry["status"] = APPROVED
             self._save(items)
             return dict(entry, id=key[:ID_LEN])
+
+    def sign(self, prefix: str, private_key: Ed25519PrivateKey) -> dict:
+        """Подписать заявку, не меняя файл: документ для переноса на машину шлюза.
+
+        Так закрытый ключ остаётся на машине оператора: шлюз получает только файл
+        с записью и подписью.
+        """
+        with self._locked():
+            items, _dropped = self._read()
+            self._purge(items)
+            key = self._resolve(items, prefix)
+            entry = dict(items[key])
+        if entry.get("status") != PENDING:
+            raise ApprovalError("already approved")
+        issued_at = self._clock()
+        # Срок действия входит в подписываемую запись: подпись фиксирует и его.
+        signed = {**entry, "status": APPROVED, "expires": issued_at + self.ttl}
+        signature = make_signature(private_key, signed, issued_at)
+        return {"version": _APPROVAL_DOC_VERSION, "key": key,
+                "entry": {**signed, "signature": signature}}
+
+    def import_signed(self, doc: object) -> dict:
+        """Принять подписанный документ: подпись, ключ заявки и поля должны сходиться."""
+        if not isinstance(doc, dict) or doc.get("version") != _APPROVAL_DOC_VERSION:
+            raise ApprovalError("unknown signed approval format")
+        key, entry = doc.get("key"), doc.get("entry")
+        if not _is_hex64(key) or not isinstance(entry, dict):
+            raise ApprovalError("malformed signed approval")
+        try:
+            _validate_entry(key, entry)
+        except ValueError as exc:
+            raise ApprovalError("signed approval record is invalid") from exc
+        if entry.get("status") != APPROVED:
+            raise ApprovalError("signed approval is not an approval")
+        expect = request_key_from_hash(entry["client"], entry["method"], entry["api"],
+                                       entry["body_sha256"], entry["content_type"])
+        if expect != key:
+            raise ApprovalError("signed approval does not match its request")
+        if self._operator_key is None or not self.signature_ok(entry):
+            raise ApprovalError("signed approval does not match the operator key")
+        self._check_signature_issued(entry["signature"])
+        issued = entry["signature"]["issued_at"]
+        if entry["expires"] > issued + self.ttl:
+            # Оператор подписал с большим ttl, чем у этого шлюза: одобрение жило бы дольше.
+            raise ApprovalError("signed approval lives longer than the gateway ttl")
+        with self._locked():
+            items, _dropped = self._read()
+            self._purge(items)
+            current = items.get(key)
+            if current is not None and self._authorized(current):
+                raise ApprovalError("already approved")
+            if len(items) >= MAX_PENDING and current is None:
+                raise ApprovalError("approvals queue is full")
+            items[key] = entry
+            self._save(items)
+        return dict(entry, id=key[:ID_LEN])
+
+    def approve_with_key(self, prefix: str, private_key: Ed25519PrivateKey) -> dict:
+        """Подписать и сразу применить одобрение (ключ и шлюз на одной машине)."""
+        return self.import_signed(self.sign(prefix, private_key))
 
     def reject(self, prefix: str) -> dict:
         """Отклонить заявку или отозвать неиспользованное подтверждение."""

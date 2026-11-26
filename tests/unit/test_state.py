@@ -107,3 +107,37 @@ def test_retry_after_values():
     assert rl.retry_after("a") == 1
     b = DailyBudget(1, clock=lambda: 86400 * 3 + 86300)
     assert b.seconds_until_reset() == 100
+
+
+def test_synchronous_mode_is_configurable(db):
+    """A4: режим PRAGMA synchronous берётся из конфига; по умолчанию NORMAL (как раньше)."""
+    s = StateStore(db, "full")
+    try:
+        assert s._all("PRAGMA synchronous")[0][0] == 2      # 2 = FULL
+    finally:
+        s.close()
+    s = StateStore(db)
+    try:
+        assert s._all("PRAGMA synchronous")[0][0] == 1      # 1 = NORMAL
+    finally:
+        s.close()
+
+
+def test_synchronous_mode_rejects_unknown_values(db):
+    with pytest.raises(ValueError):
+        StateStore(db, "off")           # ничего из конфига не попадает в SQL как есть
+
+
+def test_config_state_synchronous(tmp_path):
+    from gatekeeper.server.config import ConfigError, load_config
+
+    p = tmp_path / "c.toml"
+    p.write_text("", encoding="utf-8")
+    assert load_config(p).state_synchronous == "normal"      # старый конфиг не ломается
+    p.write_text('[state]\nsynchronous = "full"\n', encoding="utf-8")
+    assert load_config(p).state_synchronous == "full"
+    for bad in ('[state]\nsynchronous = "off"\n', '[state]\nsynchronous = 1\n',
+                '[state]\nbogus = 1\n'):
+        p.write_text(bad, encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_config(p)

@@ -158,6 +158,7 @@ def run(args, layout: Layout) -> int:
     if "ca" in created:
         output.info(f"CA key written to {ca_key_out}: move it OFFLINE, it is not needed on the server")
         if passphrase is None:
-            output.info("warning: ca.key was written without a passphrase; keep it offline, or "
-                        "create an encrypted copy (see README: review of the CA key)")
+            output.info("warning: ca.key was written WITHOUT a passphrase; keep it offline, or "
+                        "re-run init with --ca-key-pass-file (or GATEKEEPER_CA_KEY_PASSPHRASE) "
+                        "to store it encrypted")
     return 0

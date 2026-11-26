@@ -92,13 +92,17 @@ class IdentityStore:
         with self._lock:
             if sig == self._sig:
                 return
-            self._sig = sig
             by_fp: dict[str, ClientRecord] = {}
             invalid = 0
             try:
                 clients = self._registry.load()
             except GatekeeperError:
-                clients = {}  # повреждённый реестр: никого не пускаем
+                # Повреждённый реестр: никого не пускаем, но _sig не двигаем. Иначе
+                # следующая попытка чтения случится только после очередного изменения
+                # файла, и шлюз останется закрытым для всех даже после починки.
+                self._by_fp, self.invalid_entries = {}, 0
+                return
+            self._sig = sig
             for cid, entry in clients.items():
                 rec = _parse_entry(cid, entry)
                 if rec is None:
